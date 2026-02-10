@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>PolyBot Pro Dashboard</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --card: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --green: #2ea043;
+            --red: #da3633;
+            --blue: #58a6ff;
+            --orange: #d29922;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', monospace;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            font-size: 13px;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .grid {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            height: 100%;
+        }
+
+        .main {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            min-height: 0;
+        }
+
+        .header-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--card);
+            padding: 15px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+        }
+
+        .title {
+            font-size: 18px;
+            font-weight: bold;
+            color: white;
+        }
+
+        .control-btns {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+            border: none;
+            font-family: monospace;
+        }
+
+        .btn-toggle {
+            background: var(--blue);
+            color: black;
+        }
+
+        .btn-toggle.stopped {
+            background: var(--green);
+            color: black;
+        }
+
+        .btn-toggle.running {
+            background: var(--orange);
+            color: black;
+        }
+
+        .btn-nuke {
+            background: #330000;
+            border: 1px solid var(--red);
+            color: var(--red);
+        }
+
+        .btn-nuke:hover {
+            background: var(--red);
+            color: white;
+        }
+
+        .metrics {
+            display: flex;
+            gap: 15px;
+        }
+
+        .metric {
+            background: var(--card);
+            border: 1px solid var(--border);
+            padding: 15px;
+            border-radius: 6px;
+            flex: 1;
+        }
+
+        .metric label {
+            color: #8b949e;
+            display: block;
+            margin-bottom: 5px;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+
+        .metric val {
+            font-size: 20px;
+            font-weight: bold;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .tab {
+            padding: 12px 20px;
+            cursor: pointer;
+            border-right: 1px solid var(--border);
+            background: #0f1319;
+        }
+
+        .tab:hover {
+            background: #1c2128;
+        }
+
+        .tab.active {
+            background: var(--card);
+            color: var(--blue);
+            font-weight: bold;
+            border-top: 2px solid var(--blue);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            text-align: left;
+            padding: 10px;
+            background: #0f1319;
+            color: #8b949e;
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            border-bottom: 1px solid var(--border);
+        }
+
+        td {
+            padding: 10px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: middle;
+        }
+
+        /* Dropdown & Details Styles */
+        .toggle-icon {
+            cursor: pointer;
+            display: inline-block;
+            width: 20px;
+            text-align: center;
+            color: var(--blue);
+            font-size: 10px;
+            margin-left: 8px;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            padding: 2px;
+        }
+
+        .toggle-icon:hover {
+            background: #30363d;
+        }
+
+        .details-row {
+            background: #0f1319;
+        }
+
+        .details-table {
+            width: 95%;
+            margin: 10px auto;
+            border: 1px solid #30363d;
+            background: #161b22;
+        }
+
+        .details-table th {
+            background: #21262d;
+            font-size: 10px;
+            padding: 6px;
+        }
+
+        .details-table td {
+            font-size: 11px;
+            padding: 6px;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .btn-close {
+            background: #da363320;
+            color: #da3633;
+            border: 1px solid #da3633;
+            padding: 4px 10px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+
+        .btn-close:hover {
+            background: #da3633;
+            color: white;
+        }
+
+        a {
+            color: var(--blue);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        .pos {
+            color: var(--green);
+        }
+
+        .neg {
+            color: var(--red);
+        }
+    </style>
+
+</head>
+
+<body>
+
+    <div class="grid">
+        <div class="main">
+            <div class="header-controls">
+                <div class="title">
+                    🤖 PolyBot Pro
+                    <span id="status-badge"
+                        style="font-size:12px; padding:2px 6px; border-radius:4px; margin-left:10px;">...</span>
+                    <div id="target-profile"
+                        style="font-size: 11px; color: #8b949e; margin-top: 4px; font-weight: normal;">
+                        Target: <span id="p-name">...</span> <span id="p-addr"
+                            style="font-family: monospace; opacity: 0.7;">(...)</span>
+                    </div>
+                </div>
+                <div class="control-btns">
+                    <button class="btn btn-toggle" id="btn-toggle" onclick="toggleBot()">LOADING...</button>
+                    <button class="btn btn-nuke" onclick="closeAll()">⚠️ CLOSE ALL</button>
+                </div>
+            </div>
+
+            <!-- TRADE AMOUNT SETTINGS -->
+            <div class="settings-bar"
+                style="background: var(--card); padding: 10px; border: 1px solid var(--border); border-radius: 6px; display:flex; gap:15px; align-items:center;">
+                <span style="font-weight:bold; color:#8b949e; font-size:11px; text-transform:uppercase;">Trade
+                    Amount:</span>
+
+                <label style="cursor:pointer; display:flex; align-items:center; gap:5px;">
+                    <input type="radio" name="tradeMode" value="PERCENTAGE" onchange="toggleTradeInputs()">
+                    % of Target
+                </label>
+
+                <label style="cursor:pointer; display:flex; align-items:center; gap:5px;">
+                    <input type="radio" name="tradeMode" value="FIXED" onchange="toggleTradeInputs()">
+                    Fixed USD
+                </label>
+
+                <div id="input-percentage" style="display:flex; align-items:center; gap:5px;">
+                    <input type="number" id="val-pct" step="1" min="1" max="100"
+                        style="width:50px; padding:4px; background:#0d1117; border:1px solid #30363d; color:white; border-radius:4px;">
+                    %
+                </div>
+
+                <div id="input-fixed" style="display:none; align-items:center; gap:5px;">
+                    $ <input type="number" id="val-fixed" step="1" min="1"
+                        style="width:60px; padding:4px; background:#0d1117; border:1px solid #30363d; color:white; border-radius:4px;">
+                </div>
+
+                <button id="btn-save-settings" class="btn"
+                    style="background:#21262d; border:1px solid #30363d; color:#c9d1d9; padding:4px 10px; font-size:11px;"
+                    onclick="saveTradeSettings()">SAVE</button>
+            </div>
+
+            <div class="metrics">
+                <div class="metric"><label>Cash Balance</label>
+                    <val id="m-cash">...</val>
+                </div>
+
+                <div class="metric"><label>All Time PnL</label>
+                    <val id="m-alltime">...</val>
+                </div>
+
+                <div class="metric"><label>Today's Realized</label>
+                    <val id="m-daily-realized">...</val>
+                </div>
+
+                <div class="metric"><label>Unrealized PnL</label>
+                    <val id="m-unrealized">...</val>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="tabs">
+                    <div class="tab active" onclick="setTab('active')">Active Positions</div>
+                    <div class="tab" onclick="setTab('pending')">Pending Resolution</div>
+                    <div class="tab" onclick="setTab('closed')">Closed Trades</div>
+                    <div class="tab" onclick="setTab('history')">Order History</div>
+                </div>
+
+                <div style="overflow-y: auto; flex-grow: 1;">
+
+                    <table id="t-active">
+                        <thead>
+                            <tr>
+                                <th width="35%">Market</th>
+                                <th>Outcome</th>
+                                <th>Qty</th>
+                                <th>Avg Cost</th>
+                                <th>Current Price</th>
+                                <th>Invested</th>
+                                <th>Current Val</th>
+                                <th>PnL</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+
+                    <table id="t-pending" style="display: none;">
+                        <thead>
+                            <tr>
+                                <th width="35%">Market</th>
+                                <th>Outcome</th>
+                                <th>Qty</th>
+                                <th>Avg Cost</th>
+                                <th>Current Price</th>
+                                <th>Invested</th>
+                                <th>Current Val</th>
+                                <th>PnL</th>
+                                <th>Expiry</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+
+                    <table id="t-closed" style="display: none;">
+                        <thead>
+                            <tr>
+                                <th width="35%">Market</th>
+                                <th>Outcome</th>
+                                <th>Result</th>
+                                <th>Reason</th>
+                                <th>Avg Cost</th>
+                                <th>Exit Price</th>
+                                <th>Invested</th>
+
+                                <th>PnL</th>
+                                <th>Closed At</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+
+                    <table id="t-history" style="display: none;">
+                        <thead>
+                            <tr>
+                                <th width="30%">Market</th>
+                                <th>Action</th>
+                                <th>Outcome</th>
+                                <th>Source Price</th>
+                                <th>My Price</th>
+                                <th>Qty</th>
+                                <th>Amount</th>
+                                <th>ms</th>
+                                <th>Time</th>
+                                <th>Src</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+
+                </div>
+            </div>
+        </div>
+
+
+    </div>
+
+    <script>
+        let data = null;
+        let expandedRows = new Set();
+
+
+
+        async function update() {
+            try {
+                const res = await fetch('/api/stats');
+                data = await res.json();
+                render();
+            } catch (e) {
+                console.error('Update failed:', e);
+            }
+        }
+
+        // ... existing toggleDetails ...
+
+        function toggleDetails(id) {
+            if (expandedRows.has(id)) expandedRows.delete(id);
+            else expandedRows.add(id);
+            render();
+        }
+
+        // ... existing fmtDate ...
+        function fmtDate(isoString) {
+            if (!isoString) return '-';
+            const d = new Date(isoString);
+            if (isNaN(d.getTime())) return isoString;
+
+            const day = String(d.getDate()).padStart(2, '0');
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const year = String(d.getFullYear()).slice(-2);
+            const hours = String(d.getHours()).padStart(2, '0');
+            const mins = String(d.getMinutes()).padStart(2, '0');
+            const secs = String(d.getSeconds()).padStart(2, '0');
+
+            return `${day}-${month}-${year} ${hours}:${mins}:${secs}`;
+        }
+
+        // ... (Skipping getHistorySubTable as it is unchanged, but we need to match context) ...
+        // Actually, replace_file_content needs exact context. I will target the update function specifically.
+
+        /* 
+           Wait, I need to replace the onclick in render() too. 
+           I should do this in two steps or a larger block if they are close.
+           They are not very close. render() is further down.
+           I will do the script setup first, then the render() update.
+        */
+
+
+        // --- UPDATED DROPDOWN TABLE ---
+        function getHistorySubTable(marketId, side) {
+            if (!data || !data.history) return '<div style="padding:10px; text-align:center">No history found</div>';
+
+            // Filter history for this specific position
+            const relevantTrades = data.history.filter(h => h.marketId === marketId && h.side === side);
+
+            if (relevantTrades.length === 0) return '<div style="padding:10px; text-align:center">No trades recorded</div>';
+
+            return `
+            <table class="details-table">
+                <thead>
+                    <tr>
+                        <th colspan="8" style="text-align:left; color:#58a6ff">ORDER HISTORY FOR THIS POSITION</th>
+                    </tr>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Action</th>
+                        <th>Outcome</th>
+                        <th>Source Price</th>
+                        <th>My Price</th>
+                        <th>Qty</th>
+                        <th>Amount Invested</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${relevantTrades.map(h => `
+                        <tr>
+                            <td>${fmtDate(h.timestamp)}</td>
+                            <td style="color:${h.type === 'BUY' ? '#2ea043' : '#da3633'}">${h.type}</td>
+                            <td style="color:${(h.side === 'YES' || h.outcomeLabel === 'Yes' || h.outcomeLabel === 'Up') ? '#2ea043' : '#da3633'}">
+                                ${h.outcomeLabel || h.side}
+                            </td>
+                            <td>${h.sourcePrice !== undefined ? fmtPrice(h.sourcePrice) : '-'}</td>
+                            <td>${fmtPrice(h.price)}</td>
+                            <td>${fmt(h.quantity)}</td>
+                            <td>${fmt(h.usdValue, true)}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+        }
+
+        function render() {
+            if (!data) return;
+
+            // Status Bar
+            const btnToggle = document.getElementById('btn-toggle');
+            const badge = document.getElementById('status-badge');
+            if (data.botStatus === 'RUNNING') {
+                btnToggle.innerText = '⏸ STOP COPYING';
+                btnToggle.className = 'btn btn-toggle running';
+                badge.innerText = 'RUNNING';
+                badge.style.background = '#2ea043';
+                badge.style.color = 'black';
+            } else {
+                btnToggle.innerText = '▶ START COPYING';
+                btnToggle.className = 'btn btn-toggle stopped';
+                badge.innerText = 'STOPPED';
+                badge.style.background = '#da3633';
+                badge.style.color = 'white';
+            }
+
+            // Profile Info
+            if (data.profile) {
+                document.getElementById('p-name').innerText = data.profile.name || 'Unknown';
+                if (data.profile.address) {
+                    const addr = data.profile.address;
+                    const short = addr.substring(0, 6) + '...' + addr.substring(addr.length - 4);
+                    document.getElementById('p-addr').innerText = `(${short})`;
+                    document.getElementById('p-addr').title = addr;
+                }
+            }
+
+            // Metrics
+            document.getElementById('m-cash').innerText = fmt(data.balance, true);
+            document.getElementById('m-alltime').innerHTML = fmtPnL(data.allTimePnL);
+
+            // --- SPLIT PNL ---
+            document.getElementById('m-daily-realized').innerHTML = fmtPnL(data.dailyRealizedPnL);
+            document.getElementById('m-unrealized').innerHTML = fmtPnL(data.totalUnrealizedPnL);
+
+
+
+
+
+
+
+
+
+            // --- ACTIVE & PENDING POSITIONS ---
+            const tbActive = document.querySelector('#t-active tbody');
+            const tbPending = document.querySelector('#t-pending tbody');
+
+            if (data.activePositions) {
+                const now = Date.now();
+                const active = [];
+                const pending = [];
+
+                // Filter Logic
+                data.activePositions.forEach(p => {
+                    if (p.endTime && p.endTime < now) {
+                        pending.push(p);
+                    } else {
+                        active.push(p);
+                    }
+                });
+
+                // Render Active
+                tbActive.innerHTML = active.map(p => {
+                    const uniqueId = `active-${p.marketId}-${p.side}`;
+                    const isExpanded = expandedRows.has(uniqueId);
+                    const arrow = isExpanded ? '▲' : '▼';
+
+                    return `
+                <tr>
+                    <td>
+                        <a href="https://polymarket.com/event/${p.marketSlug || ''}" target="_blank">${p.marketName || 'Unknown Market'}</a>
+                        <span class="toggle-icon" onclick="toggleDetails('${uniqueId}')">${arrow}</span>
+                    </td>
+                    <td style="color:${(p.side === 'YES' || p.outcomeLabel === 'Yes' || p.outcomeLabel === 'Up') ? '#2ea043' : '#da3633'}">
+                        ${p.outcomeLabel || p.side}
+                    </td>
+                    <td>${fmt(p.size)}</td>
+                    <td>${fmtPrice(p.entryPrice)}</td>
+                    <td>${fmtPrice(p.currentPrice)}</td>
+                    <td>${fmt(p.investedUsd, true)}</td>
+                    <td>${fmt(p.currentValue, true)}</td>
+                    <td>${fmtPnL(p.unrealizedPnL)}</td>
+                    <td><button class="btn-close" onclick="closePos('${p.marketId}', '${p.side}')">CLOSE</button></td>
+                </tr>
+                <tr class="details-row" style="display: ${isExpanded ? 'table-row' : 'none'}">
+                    <td colspan="9">
+                        ${getHistorySubTable(p.marketId, p.side)}
+                    </td>
+                </tr>
+            `}).join('');
+
+                // Render Pending
+                tbPending.innerHTML = pending.map(p => {
+                    const uniqueId = `pending-${p.marketId}-${p.side}`;
+                    const isExpanded = expandedRows.has(uniqueId);
+                    const arrow = isExpanded ? '▲' : '▼';
+
+                    return `
+                <tr>
+                    <td>
+                        <a href="https://polymarket.com/event/${p.marketSlug || ''}" target="_blank">${p.marketName || 'Unknown Market'}</a>
+                        <span class="toggle-icon" onclick="toggleDetails('${uniqueId}')">${arrow}</span>
+                    </td>
+                    <td style="color:${(p.side === 'YES' || p.outcomeLabel === 'Yes' || p.outcomeLabel === 'Up') ? '#2ea043' : '#da3633'}">
+                        ${p.outcomeLabel || p.side}
+                    </td>
+                    <td>${fmt(p.size)}</td>
+                    <td>${fmtPrice(p.entryPrice)}</td>
+                    <td>${fmtPrice(p.currentPrice)}</td>
+                    <td>${fmt(p.investedUsd, true)}</td>
+                    <td>${fmt(p.currentValue, true)}</td>
+                    <td>${fmtPnL(p.unrealizedPnL)}</td>
+                    <td style="color: #d29922;">PENDING RESOLUTION</td>
+                </tr>
+                <tr class="details-row" style="display: ${isExpanded ? 'table-row' : 'none'}">
+                    <td colspan="9">
+                        ${getHistorySubTable(p.marketId, p.side)}
+                    </td>
+                </tr>
+            `}).join('');
+            }
+
+            const tbClosed = document.querySelector('#t-closed tbody');
+            if (data.closedPositions) {
+                tbClosed.innerHTML = data.closedPositions.map(p => {
+                    const uniqueId = `closed-${p.marketId}-${p.side}-${p.closeTimestamp}`;
+                    const isExpanded = expandedRows.has(uniqueId);
+                    const arrow = isExpanded ? '▲' : '▼';
+
+                    // Logic to display reason (New Structured vs Old String)
+                    let displayReason = p.reason || 'AUTO';
+                    if (p.closeCause) {
+                        displayReason = `<span title="${p.closeTrigger}">${p.closeCause}</span>`;
+                    }
+
+                    return `
+                <tr>
+                    <td>
+                        <a href="https://polymarket.com/event/${p.marketSlug || ''}" target="_blank">${p.marketName || 'Unknown Market'}</a>
+                        <span class="toggle-icon" onclick="toggleDetails('${uniqueId}')">${arrow}</span>
+                    </td>
+                    <td style="color:${(p.side === 'YES' || p.outcomeLabel === 'Yes' || p.outcomeLabel === 'Up') ? '#2ea043' : '#da3633'}">
+                        ${p.outcomeLabel || p.side}
+                    </td>
+                    <td>${p.realizedPnL >= 0 ? 'WIN' : 'LOSS'}</td>
+                    <td style="font-size:11px; color:#aaa;">${displayReason}</td>
+                    <td>${fmtPrice(p.entryPrice)}</td>
+                    <td>${fmtPrice(p.exitPrice)}</td>
+                    <td>${fmt(p.investedUsd, true)}</td>
+                    <td>${fmt(p.returnUsd, true)}</td>
+                    <td>${fmtPnL(p.realizedPnL)}</td>
+                    <td>${fmtDate(p.closeTimestamp)}</td> </tr>
+                <tr class="details-row" style="display: ${isExpanded ? 'table-row' : 'none'}">
+                    <td colspan="10">
+                         ${getHistorySubTable(p.marketId, p.side)}
+                    </td>
+                </tr>
+            `}).join('');
+            }
+
+            // --- GLOBAL HISTORY ---
+            const tbHist = document.querySelector('#t-history tbody');
+            if (data.history) {
+                tbHist.innerHTML = data.history.map(h => `
+                    <tr>
+                        <td><a href="https://polymarket.com/event/${h.marketSlug || ''}" target="_blank">${h.marketName || 'Unknown'}</a></td>
+                        <td>${h.type || 'TRADE'}</td>
+                        <td style="color:${(h.side === 'YES' || h.outcomeLabel === 'Yes' || h.outcomeLabel === 'Up') ? '#2ea043' : '#da3633'}">
+                            ${h.outcomeLabel || h.side}
+                        </td>
+                        <td>${h.sourcePrice !== undefined ? fmtPrice(h.sourcePrice) : '-'}</td>
+                        <td>${fmtPrice(h.price)}</td>
+                        <td>${fmt(h.quantity)}</td>
+                        <td>${fmt(h.usdValue, true)}</td>
+                        <td style="font-family: monospace; color: #8b949e;">${h.latencyMs ? h.latencyMs + 'ms' : '-'}</td>
+                        <td>${fmtDate(h.timestamp)}</td>
+                        <td>${h.eventId && h.eventId.startsWith('0x')
+                        ? `<a href="https://polygonscan.com/tx/${h.eventId}" target="_blank" title="View source tx on Polygonscan" style="font-size:14px">&#x2197;</a>`
+                        : '-'}</td>
+                    </tr>
+                `).join('');
+            }
+        }
+
+        async function toggleBot() { await fetch('/api/control/toggle', { method: 'POST' }); update(); }
+        async function closeAll() { try { await fetch('/api/control/close-all', { method: 'POST' }); setTimeout(update, 1500); } catch (e) { console.error('Close all failed:', e); } }
+        async function closePos(id, side) { try { await fetch('/api/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ marketId: id, side }) }); setTimeout(update, 1000); } catch (e) { console.error('Close position failed:', e); } }
+
+        function setTab(name) {
+            localStorage.setItem('activeTab', name);
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            // Find the specific tab element clicked OR find by text content if event is null (init)
+            const tabs = document.querySelectorAll('.tab');
+            tabs.forEach(t => {
+                if (t.getAttribute('onclick').includes(`'${name}'`)) {
+                    t.classList.add('active');
+                }
+            });
+
+            document.getElementById('t-active').style.display = 'none';
+            document.getElementById('t-pending').style.display = 'none';
+            document.getElementById('t-closed').style.display = 'none';
+            document.getElementById('t-history').style.display = 'none';
+            document.getElementById('t-' + name).style.display = 'table';
+        }
+
+        // Initialize Tab from LocalStorage
+        const savedTab = localStorage.getItem('activeTab') || 'active';
+        setTab(savedTab);
+        function fmt(num, isCurr = false) {
+            if (num === undefined || num === null || isNaN(num)) return isCurr ? '$0.00' : '0.00';
+            return isCurr ? '$' + num.toFixed(2) : num.toFixed(2);
+        }
+        function fmtPrice(num) {
+            if (num === undefined || num === null || isNaN(num)) return '$0.00';
+            return '$' + num.toFixed(2);
+        }
+        function fmtPnL(num) { if (num === undefined || num === null || isNaN(num)) num = 0; const sign = num >= 0 ? '+' : '-'; const color = num >= 0 ? 'pos' : 'neg'; return `<span class="${color}">${sign}$${Math.abs(num).toFixed(2)}</span>`; }
+
+        // --- TRADE SETTINGS LOGIC ---
+        function toggleTradeInputs() {
+            const mode = document.querySelector('input[name="tradeMode"]:checked').value;
+            if (mode === 'PERCENTAGE') {
+                document.getElementById('input-percentage').style.display = 'flex';
+                document.getElementById('input-fixed').style.display = 'none';
+            } else {
+                document.getElementById('input-percentage').style.display = 'none';
+                document.getElementById('input-fixed').style.display = 'flex';
+            }
+        }
+
+        async function loadTradeSettings() {
+            try {
+                const res = await fetch('/api/settings/trade-amount');
+                const settings = await res.json();
+
+                // Set Radio
+                const radios = document.getElementsByName('tradeMode');
+                for (const r of radios) {
+                    if (r.value === settings.mode) r.checked = true;
+                }
+
+                // Set Values
+                document.getElementById('val-pct').value = (settings.percentage * 100) || 10; // Convert 0.1 to 10
+                document.getElementById('val-fixed').value = settings.fixedAmountUsd || 10;
+
+                toggleTradeInputs();
+            } catch (e) {
+                console.error('Failed to load settings:', e);
+            }
+        }
+
+        async function saveTradeSettings() {
+            const btn = document.getElementById('btn-save-settings');
+            const originalText = btn.innerText;
+            btn.innerText = 'SAVING...';
+            btn.disabled = true;
+
+            try {
+                const mode = document.querySelector('input[name="tradeMode"]:checked').value;
+                const pctVal = parseFloat(document.getElementById('val-pct').value);
+                const fixedVal = parseFloat(document.getElementById('val-fixed').value);
+
+                const payload = {
+                    mode,
+                    percentage: pctVal / 100, // Convert 10 to 0.1
+                    fixedAmountUsd: fixedVal
+                };
+
+                const res = await fetch('/api/settings/trade-amount', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (res.ok) {
+                    btn.innerText = 'SAVED!';
+                    setTimeout(() => { btn.innerText = originalText; btn.disabled = false; }, 1500);
+                } else {
+                    throw new Error('Save failed');
+                }
+            } catch (e) {
+                console.error(e);
+                btn.innerText = 'ERROR';
+                setTimeout(() => { btn.innerText = originalText; btn.disabled = false; }, 1500);
+            }
+        }
+
+        // Init
+        loadTradeSettings();
+        setInterval(update, 1000); update();
+    </script>
+</body>
+
+</html>
