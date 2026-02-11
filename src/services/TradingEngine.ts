@@ -7,7 +7,7 @@ import SlippageCalculator from './SlippageCalculator.js';
 import MarketResolver from './MarketResolver.js';
 import RetryHelper from './RetryHelper.js';
 import PositionFilter from './PositionFilter.js';
-import { PositionState, CloseTrigger, CloseCause, TradeAmountMode, TradeAmountSettings } from '../types.js';
+import { PositionState, CloseTrigger, CloseCause, TradeAmountMode, TradeAmountSettings, NormalizedMarket, NormalizedOutcome } from '../types.js';
 import FeatureSwitches from '../config/switches.js';
 
 class TradingEngine {
@@ -146,10 +146,22 @@ class TradingEngine {
         side: 'YES' | 'NO',
         trigger: CloseTrigger,
         cause: CloseCause,
-        forcePrice?: number
+        forcePrice?: number,
+        tokenId?: string,
+        outcomeLabel?: string
     ): Promise<void> {
-        const posKey = `${marketId}-${side}`;
-        const pos = this.ledger.getPositions()[posKey];
+        // NEW ROBUST POSITION KEY: Matches LedgerService logic
+        let posKey = tokenId ? `${marketId}-${tokenId}` : `${marketId}-${side}-${outcomeLabel}`;
+        let pos = this.ledger.getPositions()[posKey];
+
+        // FALLBACK: Legacy Key Check
+        if (!pos) {
+            const legacyKey = `${marketId}-${side}`;
+            if (this.ledger.getPositions()[legacyKey]) {
+                posKey = legacyKey;
+                pos = this.ledger.getPositions()[posKey];
+            }
+        }
 
         // 1. EXISTENCE CHECK
         if (!pos) {
@@ -365,16 +377,37 @@ class TradingEngine {
                 if (resolutionStatus.isResolved) {
                     if (config.DEBUG_LOGS) console.log(
                         `\n[WATCHDOG] Market ${marketId.substring(0, 8)}... is RESOLVED. ` +
-                        `Winner: ${resolutionStatus.winningSide || 'TBD'} (Source: ${resolutionStatus.source})`
+                        `Winner: ${resolutionStatus.winningOutcomeLabel || resolutionStatus.winningSide || 'TBD'} (Source: ${resolutionStatus.source})`
                     );
 
                     // Settle all positions in this market
-                    const reason = `RESOLUTION: WINNER_${resolutionStatus.winningSide || 'UNKNOWN'}`;
-                    if (positions[`${marketId}-YES`]) {
-                        await this.settlePosition(marketId, 'YES', reason, resolutionStatus.winningSide);
-                    }
-                    if (positions[`${marketId}-NO`]) {
-                        await this.settlePosition(marketId, 'NO', reason, resolutionStatus.winningSide);
+                    const marketPositions = Object.values(positions).filter(p => p.marketId === marketId);
+
+                    for (const pos of marketPositions) {
+                        // Determine if this specific position won
+                        let isWinner = false;
+                        if (resolutionStatus.winningOutcomeIndex !== undefined && pos.tokenId) {
+                            const meta = this.ledger.getMarketCache(marketId);
+                            if (meta && meta.clobTokenIds) {
+                                const winTokenId = meta.clobTokenIds[resolutionStatus.winningOutcomeIndex];
+                                if (winTokenId === pos.tokenId) isWinner = true;
+                            }
+                        } else if (resolutionStatus.winningOutcomeLabel && pos.outcomeLabel) {
+                            if (resolutionStatus.winningOutcomeLabel.toUpperCase() === pos.outcomeLabel.toUpperCase()) isWinner = true;
+                        } else if (resolutionStatus.winningSide) {
+                            if (resolutionStatus.winningSide === pos.side) isWinner = true;
+                        }
+
+                        const reason = `RESOLUTION: Winner=${resolutionStatus.winningOutcomeLabel || resolutionStatus.winningSide || 'Unknown'}`;
+                        await this.settlePosition(
+                            marketId,
+                            pos.side,
+                            reason,
+                            resolutionStatus.winningSide,
+                            pos.tokenId,
+                            pos.outcomeLabel,
+                            isWinner
+                        );
                     }
                 }
             } catch (err: any) {
@@ -466,18 +499,24 @@ class TradingEngine {
         }
     }
 
-    private async settlePosition(marketId: string, side: 'YES' | 'NO', reason: string, winningSide?: 'YES' | 'NO' | null) {
+    private async settlePosition(
+        marketId: string,
+        side: 'YES' | 'NO',
+        reason: string,
+        winningSide?: 'YES' | 'NO' | null,
+        tokenId?: string,
+        outcomeLabel?: string,
+        isWinner?: boolean
+    ) {
         let trigger = CloseTrigger.MARKET_RESOLUTION;
-        let cause = CloseCause.WINNER_YES; // Default
+        let cause = isWinner ? CloseCause.WINNER_YES : CloseCause.WINNER_NO;
 
-        if (winningSide === 'YES') cause = CloseCause.WINNER_YES;
-        else if (winningSide === 'NO') cause = CloseCause.WINNER_NO;
-        else if (reason.includes('EXPIRED')) {
-            trigger = CloseTrigger.SYSTEM_GUARD;
-            cause = CloseCause.MARKET_EXPIRED;
+        // Backward compatibility for binary if winningSide is passed but isWinner is undefined
+        if (isWinner === undefined && winningSide) {
+            cause = (side === winningSide) ? CloseCause.WINNER_YES : CloseCause.WINNER_NO;
         }
 
-        await this.tryClosePosition(marketId, side, trigger, cause);
+        await this.tryClosePosition(marketId, side, trigger, cause, 0, tokenId, outcomeLabel);
     }
 
 
@@ -502,12 +541,64 @@ class TradingEngine {
             return;
         }
 
-        // ===== 1. FETCH ORDER BOOK FOR REALISTIC EXECUTION & SLIPPAGE =====
+        // ===== 1. FETCH METADATA & NORMALIZED MODEL =====
+        let marketName = "Loading...";
+        let marketSlug = "";
+        let outcomes: string[] = [];
+        let model: NormalizedMarket | undefined;
+
+        const cachedMeta = this.ledger.getMarketCache(marketId);
+        if (cachedMeta) {
+            marketName = cachedMeta.question;
+            marketSlug = cachedMeta.slug;
+            outcomes = cachedMeta.outcomes;
+            model = cachedMeta.model;
+        } else {
+            const meta = await this.api.getMarketDetails(marketId);
+            if (meta) {
+                this.ledger.updateMarketCache(marketId, meta.question, meta.slug, meta.outcomes, meta.clobTokenIds, meta.endTime);
+                // Also update local model ref
+                const fresh = this.ledger.getMarketCache(marketId);
+                model = fresh?.model;
+                marketName = meta.question;
+                marketSlug = meta.slug;
+                outcomes = meta.outcomes;
+            }
+        }
+
+        if (!model) {
+            console.error(`[ENGINE] Failed to resolve market model for ${marketId}. Skipping.`);
+            return;
+        }
+
+        // ===== 2. SMART OUTCOME SELECTION =====
+        const rawOutcomeStr = String(raw.outcome || '').toUpperCase();
+        let selectedOutcome: NormalizedOutcome | undefined;
+
+        // Try to match by label exactly 
+        selectedOutcome = model.outcomes.find((o: NormalizedOutcome) => o.label.toUpperCase() === rawOutcomeStr);
+
+        // Fallback: Binary YES/NO mapping for signals
+        if (!selectedOutcome && model.type === 'binary') {
+            if (['YES', '1', 'TRUE', 'UP', 'PASS'].includes(rawOutcomeStr)) selectedOutcome = model.outcomes[1];
+            else if (['NO', '0', 'FALSE', 'DOWN', 'FAIL'].includes(rawOutcomeStr)) selectedOutcome = model.outcomes[0];
+        }
+
+        if (!selectedOutcome) {
+            console.warn(`[ENGINE] Could not map outcome "${rawOutcomeStr}" in market "${marketName}". Skipping.`);
+            return;
+        }
+
+        const outcomeLabel = selectedOutcome.label;
+        const tokenId = selectedOutcome.tokenId;
+        const side: 'YES' | 'NO' = (model.type === 'binary' && model.outcomes[0].tokenId === tokenId) ? 'NO' : 'YES';
+
+        // ===== 3. FETCH ORDER BOOK FOR SELECTED OUTCOME =====
         let orderBook: any = null;
         let marketPrice: any = null;
 
         try {
-            orderBook = await this.api.getOrderBook(marketId);
+            orderBook = await this.api.getOrderBookForToken(tokenId, marketId);
             if (orderBook && orderBook.bids.length > 0 && orderBook.asks.length > 0) {
                 const bestBid = orderBook.bids[0].price;
                 const bestAsk = orderBook.asks[0].price;
@@ -515,115 +606,50 @@ class TradingEngine {
                 marketPrice = { bestBid, bestAsk, midPrice };
             }
         } catch (err: any) {
-            console.warn(`[ENGINE] Error fetching order book for ${marketId.substring(0, 8)}...: ${err.message}`);
+            console.warn(`[ENGINE] Error fetching order book for token ${tokenId.substring(0, 8)}...: ${err.message}`);
         }
-
-        // 2. Fetch Metadata
-        let marketName = "Loading...";
-        let marketSlug = "";
-        let outcomes = ["No", "Yes"];
-
-        const cachedMeta = this.ledger.getMarketCache(marketId);
-        if (cachedMeta) {
-            marketName = cachedMeta.question;
-            marketSlug = cachedMeta.slug;
-            outcomes = cachedMeta.outcomes;
-        } else {
-            const meta = await this.api.getMarketDetails(marketId);
-            if (meta) {
-                this.ledger.updateMarketCache(marketId, meta.question, meta.slug, meta.outcomes, meta.clobTokenIds, meta.endTime);
-                marketName = meta.question;
-                marketSlug = meta.slug;
-                outcomes = meta.outcomes;
-            }
-        }
-
-
-        // 3. SMART OUTCOME MAPPING
-        const rawOutcomeStr = String(raw.outcome || '').toUpperCase();
-        let outcomeIndex = -1;
-
-        if (outcomes.length > 0) {
-            const directIndex = outcomes.findIndex(o => String(o).toUpperCase() === rawOutcomeStr);
-            if (directIndex !== -1) outcomeIndex = directIndex;
-        }
-
-        if (outcomeIndex === -1) {
-            if (['NO', '0', 'FALSE', 'DOWN', 'FAIL'].includes(rawOutcomeStr)) outcomeIndex = 0;
-            else if (['YES', '1', 'TRUE', 'UP', 'PASS'].includes(rawOutcomeStr)) outcomeIndex = 1;
-        }
-
-        if (outcomeIndex === -1) outcomeIndex = 1;
-
-        const outcomeLabel = outcomes[outcomeIndex] || rawOutcomeStr;
-        const side: 'YES' | 'NO' = outcomeIndex === 0 ? 'NO' : 'YES';
 
         const sourcePrice = parseFloat(raw.price || '0.5');
         const sourceSize = parseFloat(raw.size || '0');
 
-        // ===== 4. CALCULATE REALISTIC EXECUTION PRICE (YES/NO Handling) =====
+        // ===== 4. CALCULATE REALISTIC EXECUTION PRICE =====
         let executionPrice = sourcePrice;
 
         if (marketPrice) {
-            if (side === 'YES') {
-                // YES Side: Standard Logic
-                // Buy YES @ Ask, Sell YES @ Bid
-                if (isBuy) {
-                    executionPrice = marketPrice.bestAsk;
-                    if (config.DEBUG_LOGS) console.log(`[EXECUTION-REALISM] Buying YES at Best Ask: $${executionPrice.toFixed(4)} (source: $${sourcePrice.toFixed(4)})`);
-                } else {
-                    executionPrice = marketPrice.bestBid;
-                    if (config.DEBUG_LOGS) console.log(`[EXECUTION-REALISM] Selling YES at Best Bid: $${executionPrice.toFixed(4)} (source: $${sourcePrice.toFixed(4)})`);
-                }
+            // In multi-outcome, we always trade the specific outcome book.
+            // Buying an outcome = Best Ask of that outcome's book.
+            // Selling an outcome = Best Bid of that outcome's book.
+            if (isBuy) {
+                executionPrice = marketPrice.bestAsk;
+                if (config.DEBUG_LOGS) console.log(`[EXECUTION-REALISM] Buying ${outcomeLabel} at Best Ask: $${executionPrice.toFixed(4)} (source: $${sourcePrice.toFixed(4)})`);
             } else {
-                // NO Side: Inverted Logic (Buying NO = Selling YES)
-                // Buy NO @ (1 - Bid), Sell NO @ (1 - Ask)
-                if (isBuy) {
-                    executionPrice = 1 - marketPrice.bestBid;
-                    if (config.DEBUG_LOGS) console.log(`[EXECUTION-REALISM] Buying NO at (1 - Best Bid): $${executionPrice.toFixed(4)} (source: $${sourcePrice.toFixed(4)})`);
-                } else {
-                    executionPrice = 1 - marketPrice.bestAsk;
-                    if (config.DEBUG_LOGS) console.log(`[EXECUTION-REALISM] Selling NO at (1 - Best Ask): $${executionPrice.toFixed(4)} (source: $${sourcePrice.toFixed(4)})`);
-                }
+                executionPrice = marketPrice.bestBid;
+                if (config.DEBUG_LOGS) console.log(`[EXECUTION-REALISM] Selling ${outcomeLabel} at Best Bid: $${executionPrice.toFixed(4)} (source: $${sourcePrice.toFixed(4)})`);
             }
         }
 
-        // ===== 4b. $1.00 PRICE GUARD (WAIT & RETRY) =====
+        // ===== 5. $1.00 PRICE GUARD (WAIT & RETRY) =====
         if (executionPrice >= 1.0) {
-            console.log(`[PRICE-GUARD] ⚠️ Execution price is $1.00. Waiting 30s for pullback...`);
+            console.log(`[PRICE-GUARD] ⚠️ Execution price is $1.00 for ${outcomeLabel}. Waiting 30s...`);
             await new Promise(resolve => setTimeout(resolve, 30000));
 
             // Re-fetch Order Book
             try {
-                const freshOB = await this.api.getOrderBook(marketId);
+                const freshOB = await this.api.getOrderBookForToken(tokenId, marketId);
                 if (freshOB && freshOB.bids.length > 0 && freshOB.asks.length > 0) {
                     const bestBid = freshOB.bids[0].price;
                     const bestAsk = freshOB.asks[0].price;
                     const midPrice = (bestBid + bestAsk) / 2;
-                    const freshMarketPrice = { bestBid, bestAsk, midPrice };
-                    marketPrice = freshMarketPrice; // Update local scope variable for subsequent logs if needed
+                    marketPrice = { bestBid, bestAsk, midPrice };
 
-                    // Recalculate execution price
-                    if (side === 'YES') {
-                        if (isBuy) {
-                            executionPrice = freshMarketPrice.bestAsk;
-                        } else {
-                            executionPrice = freshMarketPrice.bestBid;
-                        }
-                    } else {
-                        if (isBuy) {
-                            executionPrice = 1 - freshMarketPrice.bestBid;
-                        } else {
-                            executionPrice = 1 - freshMarketPrice.bestAsk;
-                        }
-                    }
+                    executionPrice = isBuy ? bestAsk : bestBid;
                 }
             } catch (e) {
-                console.warn(`[PRICE-GUARD] Failed to refresh price after wait. Keeping original price.`);
+                console.warn(`[PRICE-GUARD] Failed to refresh price. Keeping original price.`);
             }
 
             if (executionPrice >= 1.0) {
-                console.log(`[PRICE-GUARD] ⛔ Price still $1.00 after 30s wait. Skipping trade.`);
+                console.log(`[PRICE-GUARD] ⛔ Price still $1.00 after 30s. Skipping trade.`);
                 return;
             }
             console.log(`[PRICE-GUARD] ✅ Price dropped to ${executionPrice.toFixed(4)}. Proceeding.`);
@@ -721,7 +747,8 @@ class TradingEngine {
                             txHash,
                             'COPY_TRADE', // Entry Reason
                             sourcePrice,
-                            Math.max(0, Date.now() - fetchTime)
+                            Math.max(0, Date.now() - fetchTime),
+                            tokenId // NEW
                         );
                     },
                     `BUY ${myShares.toFixed(1)} shares on ${marketName.substring(0, 20)}...`
@@ -743,7 +770,9 @@ class TradingEngine {
                     side,
                     CloseTrigger.COPY_TRADER_EVENT,
                     CloseCause.SELL,
-                    executionPrice // Use calculated execution price
+                    executionPrice, // Use calculated execution price
+                    tokenId,
+                    outcomeLabel
                 );
             }
 
@@ -752,10 +781,21 @@ class TradingEngine {
         }
     }
 
-    public async manualClosePosition(marketId: string, side: 'YES' | 'NO') {
-        const posKey = `${marketId}-${side}`;
-        const pos = this.ledger.getPositions()[posKey];
-        if (!pos) throw new Error("No position found to close");
+    public async manualClosePosition(marketId: string, side: 'YES' | 'NO', tokenId?: string, outcomeLabel?: string) {
+        // NEW ROBUST POSITION KEY
+        let posKey = tokenId ? `${marketId}-${tokenId}` : `${marketId}-${side}-${outcomeLabel}`;
+        let pos = this.ledger.getPositions()[posKey];
+
+        // FALLBACK: Legacy Key Check
+        if (!pos) {
+            const legacyKey = `${marketId}-${side}`;
+            if (this.ledger.getPositions()[legacyKey]) {
+                posKey = legacyKey;
+                pos = this.ledger.getPositions()[posKey];
+            }
+        }
+
+        if (!pos) throw new Error(`No position found to close for ${posKey}`);
 
         // Forward to centralized logic
         // We let tryClosePosition handle price discovery if we don't pass one, 
@@ -770,122 +810,70 @@ class TradingEngine {
             marketId,
             side,
             CloseTrigger.USER_ACTION,
-            CloseCause.MANUAL_CLOSE
+            CloseCause.MANUAL_CLOSE,
+            undefined, // discovery used
+            tokenId,
+            outcomeLabel
         );
     }
 
     private async updateWebsocketSubscription() {
         try {
-            const positions = this.ledger.getPositions();
-            const marketIds = [...new Set(Object.values(positions).map(p => p.marketId))];
+            const positions = Object.values(this.ledger.getPositions());
+            if (positions.length === 0) return;
 
-            if (marketIds.length === 0) return;
+            // Collect all unique tokenIds we are holding
+            const tokenIds = [...new Set(positions.map(p => p.tokenId).filter(id => !!id))] as string[];
+            if (tokenIds.length === 0) return;
 
-            // Resolve tokens
-            const tokenIds: string[] = [];
-            const tokenToMarketMap = new Map<string, { marketId: string, isIndex1: boolean }>(); // tokenId -> { marketId, isIndex1 }
+            // Map tokenId to metadata (binary status)
+            const tokenMetaMap = new Map<string, { marketId: string, side: 'YES' | 'NO', isBinary: boolean }>();
 
-            for (const mid of marketIds) {
-                // FIX: Use cached clobTokenIds from Ledger
-                const meta = this.ledger.getMarketCache(mid);
-
-                // Helper to register a token
-                const register = (tokens: string[]) => {
-                    const yesToken = tokens[1]; // Index 1 is standard "YES"
-                    const noToken = tokens[0];  // Index 0 is standard "NO"
-
-                    if (yesToken) {
-                        tokenIds.push(yesToken);
-                        tokenToMarketMap.set(yesToken, { marketId: mid, isIndex1: true });
-                    } else if (noToken) {
-                        // Fallback to NO token if YES is missing
-                        tokenIds.push(noToken);
-                        tokenToMarketMap.set(noToken, { marketId: mid, isIndex1: false });
-                    }
-                };
-
-                if (meta && meta.clobTokenIds && meta.clobTokenIds.length > 0) {
-                    register(meta.clobTokenIds);
-                } else {
-                    // Fallback to API
-                    const newMeta = await this.api.getMarketDetails(mid);
-                    if (newMeta && newMeta.clobTokenIds) {
-                        this.ledger.updateMarketCache(mid, newMeta.question, newMeta.slug, newMeta.outcomes, newMeta.clobTokenIds);
-                        register(newMeta.clobTokenIds);
-                    }
-                }
-            }
-
-            if (tokenIds.length > 0) {
-                // console.log(`[WS-SETUP] Subscribing to ${tokenIds.length} tokens`);
-                this.api.subscribeToOrderbook(tokenIds, (data: any) => {
-                    // Parse message into updates
-                    let updates: any[] = [];
-
-                    if (Array.isArray(data)) {
-                        updates = data;
-                    } else if (data && typeof data === 'object') {
-                        if (Array.isArray(data.data)) {
-                            updates = data.data;
-                        } else if (Array.isArray(data.price_changes)) {
-                            updates = data.price_changes;
-                        } else {
-                            return; // Skip malformed messages
-                        }
-                    } else {
-                        return;
-                    }
-
-                    if (updates.length === 0) return;
-
-                    // Group by marketId
-                    const byMarket = new Map<string, { bids: any[], asks: any[], isIndex1: boolean }>();
-
-                    for (const update of updates) {
-                        const info = tokenToMarketMap.get(update.asset_id);
-                        if (!info) continue;
-
-                        const { marketId, isIndex1 } = info;
-
-                        if (!byMarket.has(marketId)) {
-                            byMarket.set(marketId, { bids: [], asks: [], isIndex1 });
-                        }
-
-                        const book = byMarket.get(marketId)!;
-                        if (update.side === "BUY") {
-                            book.bids.push(update);
-                        } else if (update.side === "SELL") {
-                            book.asks.push(update);
-                        }
-                    }
-
-                    // Calculate midpoint and update ledger
-                    for (const [marketId, book] of byMarket.entries()) {
-                        if (book.bids.length === 0 && book.asks.length === 0) continue;
-
-                        book.bids.sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
-                        book.asks.sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
-
-                        // Calculate price of the TRACKED token
-                        let midpoint = 0;
-                        if (book.bids.length > 0 && book.asks.length > 0) {
-                            midpoint = (parseFloat(book.bids[0].price) + parseFloat(book.asks[0].price)) / 2;
-                        } else if (book.bids.length > 0) {
-                            midpoint = parseFloat(book.bids[0].price);
-                        } else {
-                            midpoint = parseFloat(book.asks[0].price);
-                        }
-
-                        // Normalize: Ledger ALWAYS expects Index 1 (YES) price
-                        // If we tracked Index 1: Send midpoint.
-                        // If we tracked Index 0: Send 1 - midpoint.
-                        const index1Price = book.isIndex1 ? midpoint : (1 - midpoint);
-
-                        this.ledger.updateRealTimePrice(marketId, index1Price);
-                    }
+            for (const pos of positions) {
+                if (!pos.tokenId) continue;
+                const cache = this.ledger.getMarketCache(pos.marketId);
+                tokenMetaMap.set(pos.tokenId, {
+                    marketId: pos.marketId,
+                    side: pos.side,
+                    isBinary: cache?.model?.type === 'binary'
                 });
             }
 
+            // Subscribe
+            this.api.subscribeToOrderbook(tokenIds, (data: any) => {
+                let updates: any[] = [];
+                if (Array.isArray(data)) updates = data;
+                else if (data && typeof data === 'object') {
+                    if (Array.isArray(data.data)) updates = data.data;
+                    else if (Array.isArray(data.price_changes)) updates = data.price_changes;
+                    else return;
+                } else return;
+
+                if (updates.length === 0) return;
+
+                const byToken = new Map<string, { bids: any[], asks: any[] }>();
+                for (const update of updates) {
+                    const tokenId = update.asset_id;
+                    if (!tokenMetaMap.has(tokenId)) continue;
+                    if (!byToken.has(tokenId)) byToken.set(tokenId, { bids: [], asks: [] });
+                    const book = byToken.get(tokenId)!;
+                    if (update.side === "BUY") book.bids.push(update);
+                    else if (update.side === "SELL") book.asks.push(update);
+                }
+
+                for (const [tokenId, book] of byToken.entries()) {
+                    if (book.bids.length === 0 && book.asks.length === 0) continue;
+                    book.bids.sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
+                    book.asks.sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
+                    let midpoint = 0;
+                    if (book.bids.length > 0 && book.asks.length > 0) midpoint = (parseFloat(book.bids[0].price) + parseFloat(book.asks[0].price)) / 2;
+                    else if (book.bids.length > 0) midpoint = parseFloat(book.bids[0].price);
+                    else midpoint = parseFloat(book.asks[0].price);
+
+                    const meta = tokenMetaMap.get(tokenId)!;
+                    this.ledger.updateRealTimePrice(meta.marketId, midpoint, tokenId);
+                }
+            });
         } catch (e) {
             console.error('[ENGINE] Failed to update WS subs:', e);
         }

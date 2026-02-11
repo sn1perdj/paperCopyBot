@@ -598,7 +598,7 @@
                     <td>${fmt(p.investedUsd, true)}</td>
                     <td>${fmt(p.currentValue, true)}</td>
                     <td>${fmtPnL(p.unrealizedPnL)}</td>
-                    <td><button class="btn-close" onclick="closePos('${p.marketId}', '${p.side}')">CLOSE</button></td>
+                    <td><button class="btn-close" onclick="closePos('${p.marketId}', '${p.side}', '${p.tokenId || ''}', '${p.outcomeLabel || ''}')">CLOSE</button></td>
                 </tr>
                 <tr class="details-row" style="display: ${isExpanded ? 'table-row' : 'none'}">
                     <td colspan="9">
@@ -702,7 +702,7 @@
 
         async function toggleBot() { await fetch('/api/control/toggle', { method: 'POST' }); update(); }
         async function closeAll() { try { await fetch('/api/control/close-all', { method: 'POST' }); setTimeout(update, 1500); } catch (e) { console.error('Close all failed:', e); } }
-        async function closePos(id, side) { try { await fetch('/api/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ marketId: id, side }) }); setTimeout(update, 1000); } catch (e) { console.error('Close position failed:', e); } }
+        async function closePos(id, side, tokenId, outcomeLabel) { try { await fetch('/api/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ marketId: id, side, tokenId, outcomeLabel }) }); setTimeout(update, 1000); } catch (e) { console.error('Close position failed:', e); } }
 
         function setTab(name) {
             localStorage.setItem('activeTab', name);

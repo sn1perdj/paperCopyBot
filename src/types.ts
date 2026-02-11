@@ -1,3 +1,20 @@
+export interface NormalizedOutcome {
+  tokenId: string;
+  label: string;
+  price: number;
+  isWinner?: boolean;
+}
+
+export interface NormalizedMarket {
+  id: string;
+  question: string;
+  slug: string;
+  type: 'binary' | 'multi';
+  outcomes: NormalizedOutcome[];
+  isResolved: boolean;
+  endDate?: number;
+}
+
 export interface MarketMetadata {
   id: string;
   question: string;
@@ -7,6 +24,9 @@ export interface MarketMetadata {
   outcomes: string[]; // ["No", "Yes"] or ["Trump", "Harris"]
   clobTokenIds?: string[];
   endTime?: number;
+
+  // New Normalized Field
+  model?: NormalizedMarket;
 }
 
 export interface OrderBookLevel {
@@ -61,6 +81,7 @@ export interface Position {
   marketSlug: string;
   side: 'YES' | 'NO';
   outcomeLabel: string;
+  tokenId?: string; // NEW: Unique identifier for the outcome token
   size: number;
   entryPrice: number;
   investedUsd: number;
@@ -83,6 +104,7 @@ export interface ClosedPosition {
   marketSlug: string;
   side: 'YES' | 'NO';
   outcomeLabel: string;
+  tokenId?: string; // NEW
   entryPrice: number;
   exitPrice: number;
   size: number;
@@ -106,7 +128,8 @@ export interface TradeEvent {
   marketSlug: string;
   type: 'BUY' | 'SELL';
   side: 'YES' | 'NO';
-  outcomeLabel: string; // NEW
+  outcomeLabel: string;
+  tokenId?: string; // NEW
   price: number;
   quantity: number;
   usdValue: number;

@@ -13,6 +13,8 @@ export interface MarketResolutionStatus {
   marketId: string;
   isResolved: boolean;
   winningSide?: 'YES' | 'NO' | null;
+  winningOutcomeLabel?: string;      // Multi-Outcome Support
+  winningOutcomeIndex?: number;      // Multi-Outcome Support
   settlementPrice?: number;
   resolvedAt?: number;
   source: 'clob' | 'metadata' | 'fallback';
@@ -84,6 +86,70 @@ export class MarketResolver {
     return resolution;
   }
 
+  /*
+   * Robustly determine the winner using Normalized Model or Fallbacks
+   */
+  private determineWinningOutcome(details: any): { label: string | null, index: number | null, side: 'YES' | 'NO' | null } {
+    const model = details.model;
+
+    // 1. Check if we have a Normalized Model (Preferred for Multi-Outcome)
+    if (model && model.outcomes) {
+      // Check outcome prices (e.g. ["0", "0", "1"])
+      if (details.outcomePrices) {
+        try {
+          const prices = JSON.parse(details.outcomePrices);
+          if (Array.isArray(prices)) {
+            // Find index with price 1 (or very close)
+            const winIdx = prices.findIndex((p: any) => Number(p) > 0.99);
+            if (winIdx !== -1) {
+              const label = model.outcomes[winIdx]?.label || null;
+              // Map to legacy side if binary
+              let side: 'YES' | 'NO' | null = null;
+              if (model.type === 'binary') {
+                if (winIdx === 1) side = 'YES'; // Index 1 is usually Yes
+                if (winIdx === 0) side = 'NO';
+              }
+              return { label, index: winIdx, side };
+            }
+          }
+        } catch (e) { }
+      }
+
+      // Check 'winner' field in raw details (Legacy / Specific format)
+      if (details.winner) {
+        const w = String(details.winner).toUpperCase();
+        return { label: w, index: -1, side: (w === 'YES' ? 'YES' : (w === 'NO' ? 'NO' : null)) };
+      }
+    }
+
+    // 2. Fallback to Legacy Logic (if no model)
+    // Check explicit winner field
+    if (details.winner) {
+      const w = String(details.winner).toUpperCase();
+      if (w === 'YES' || w === '1' || w === 'TRUE') return { label: 'Yes', index: 1, side: 'YES' };
+      if (w === 'NO' || w === '0' || w === 'FALSE') return { label: 'No', index: 0, side: 'NO' };
+    }
+
+    // Check legacy resolvedBy logic
+    if (details.resolved && details.resolvedBy) {
+      if ((details as any).winner === 'YES' || (details as any).winner === '1') return { label: 'Yes', index: 1, side: 'YES' };
+      if ((details as any).winner === 'NO' || (details as any).winner === '0') return { label: 'No', index: 0, side: 'NO' };
+    }
+
+    // Check outcome prices (Legacy binary assumption)
+    if (details.outcomePrices) {
+      try {
+        const prices = JSON.parse(details.outcomePrices);
+        if (Array.isArray(prices) && prices.length === 2) {
+          if (prices[0] === "1" || prices[0] === "1.0") return { label: 'No', index: 0, side: 'NO' };
+          if (prices[1] === "1" || prices[1] === "1.0") return { label: 'Yes', index: 1, side: 'YES' };
+        }
+      } catch (e) { }
+    }
+
+    return { label: null, index: null, side: null };
+  }
+
   /**
    * Primary source: Check market metadata from Gamma API
    * Most reliable way to detect if market is officially resolved
@@ -115,17 +181,22 @@ export class MarketResolver {
     const details = result.data;
     const slug = details.slug || '';
 
-    // Check official resolution status
-    if (details.resolved) {
-      if (config.DEBUG_LOGS) console.log(`[RESOLVER ✓] Market ${marketId.substring(0, 8)}... is officially RESOLVED`);
+    // Determine winner using new robust logic
+    const winInfo = this.determineWinningOutcome(details);
+
+    // Official Resolution OR Closed with clear winner
+    if (details.resolved || (details.closed && winInfo.index !== null)) {
+      if (config.DEBUG_LOGS) console.log(`[RESOLVER] ${details.slug} -> Resolved/Closed. Winner: ${winInfo.label}`);
       return {
         marketId,
         isResolved: true,
-        winningSide: this.determineWinningSide(details),
+        winningSide: winInfo.side,
+        winningOutcomeLabel: winInfo.label || undefined,
+        winningOutcomeIndex: winInfo.index !== null ? winInfo.index : undefined,
         source: 'metadata',
         confidence: 'high',
         resolvedAt: Date.now(),
-        marketSlug: slug
+        marketSlug: details.slug
       };
     }
 

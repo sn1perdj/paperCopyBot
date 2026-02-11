@@ -92,7 +92,7 @@ class LedgerService {
 
 
 
-  public updateRealTimePrice(marketId: string, price: number) {
+  public updateRealTimePrice(marketId: string, price: number, tokenId?: string) {
     this.priceCache[marketId] = price;
 
     // FIX: Instantly update active positions to avoid waiting for polling loop
@@ -100,11 +100,20 @@ class LedgerService {
     for (const key of keys) {
       const pos = this.state.positions[key];
       if (pos.marketId === marketId) {
-        // Calculate Exit Price based on Side
-        const exitPrice = pos.side === 'YES' ? price : (1 - price);
+        // 1. If we matched by tokenId, use direct price (Multi-Outcome)
+        if (tokenId && pos.tokenId === tokenId) {
+          pos.currentPrice = price;
+        }
+        // 2. Backward compatibility: Binary side-based inversion
+        else if (!tokenId) {
+          const exitPrice = pos.side === 'YES' ? price : (1 - price);
+          pos.currentPrice = exitPrice;
+        }
+        else {
+          continue; // Different token in same market
+        }
 
-        pos.currentPrice = exitPrice;
-        pos.currentValue = exitPrice * pos.size;
+        pos.currentValue = pos.currentPrice * pos.size;
         pos.unrealizedPnL = pos.currentValue - pos.investedUsd;
       }
     }
@@ -122,7 +131,8 @@ class LedgerService {
     txHash: string,
     actionReason: string,
     sourcePrice?: number,
-    latencyMs?: number
+    latencyMs?: number,
+    tokenId?: string // NEW
   ): boolean {
 
     if (txHash && this.state.processedTxHashes.includes(txHash)) return false;
@@ -137,8 +147,21 @@ class LedgerService {
 
     const costUsd = Math.abs(sizeShares * price);
     const isBuy = sizeShares > 0;
-    const posKey = `${marketId}-${side}`;
-    const existing = this.state.positions[posKey];
+
+    // NEW ROBUST POSITION KEY: Use tokenId if available, else side-label fallback
+    let posKey = tokenId ? `${marketId}-${tokenId}` : `${marketId}-${side}-${outcomeLabel}`;
+    let existing = this.state.positions[posKey];
+
+    // FALLBACK: Check for Legacy Key (MarketId-Side) if explicit key not found
+    if (!existing) {
+      const legacyKey = `${marketId}-${side}`;
+      if (this.state.positions[legacyKey]) {
+        // We found a legacy position! Use it.
+        // Option: We could migrate it here, but for now just use it.
+        existing = this.state.positions[legacyKey];
+        posKey = legacyKey;
+      }
+    }
 
     const markAsProcessed = () => {
       if (txHash) {
@@ -174,11 +197,13 @@ class LedgerService {
         existing.marketName = finalName;
         existing.marketSlug = marketSlug;
         existing.outcomeLabel = outcomeLabel;
+        existing.tokenId = tokenId || existing.tokenId;
         existing.state = PositionState.OPEN; // Re-affirm OPEN on buy
       } else {
         this.state.positions[posKey] = {
           marketId, marketName: finalName, marketSlug, side,
           outcomeLabel,
+          tokenId,
           size: sizeShares,
           entryPrice: price,
           investedUsd: costUsd,
@@ -231,6 +256,7 @@ class LedgerService {
         this.state.closedPositions.unshift({
           marketId, marketName: finalName, marketSlug, side,
           outcomeLabel: existing.outcomeLabel || outcomeLabel,
+          tokenId: existing.tokenId || tokenId,
           size: sellShares,
           entryPrice: existing.entryPrice,
           exitPrice: price,
@@ -255,6 +281,7 @@ class LedgerService {
       type: isBuy ? 'BUY' : 'SELL',
       side,
       outcomeLabel: outcomeLabel,
+      tokenId: tokenId || (existing?.tokenId),
       quantity: Math.abs(sizeShares),
       price,
       usdValue: costUsd,
