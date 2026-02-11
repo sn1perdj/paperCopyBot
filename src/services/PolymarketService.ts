@@ -91,18 +91,56 @@ export class PolymarketService {
         } catch (e) { }
       }
 
-      return {
+      // === NORMALIZATION START ===
+      const normalizedOutcomes = (outcomes || []).map((label: string, idx: number) => {
+        return {
+          tokenId: clobTokenIds?.[idx] || '',
+          label: label,
+          price: 0, // Will be filled if we have price data
+        } as any; // Cast to avoid strict issues during migration logic
+      });
+
+      // Fill prices if available
+      if (data.outcomePrices) {
+        try {
+          const prices = JSON.parse(data.outcomePrices);
+          if (Array.isArray(prices)) {
+            normalizedOutcomes.forEach((o: any, idx: number) => {
+              if (prices[idx]) o.price = Number(prices[idx]);
+            });
+          }
+        } catch (e) { }
+      }
+
+      const marketType = normalizedOutcomes.length === 2 ? 'binary' : 'multi';
+
+      const marketModel = {
+        id: marketId,
         question: data.question,
         slug: eventSlug,
+        type: marketType,
+        outcomes: normalizedOutcomes,
+        isResolved: !data.active && !!(data.resolvedBy || data.umaResolutionStatus === 'resolved'),
+        endDate: data.endDate ? new Date(data.endDate).getTime() : undefined
+      };
+      // === NORMALIZATION END ===
+
+      return {
+        id: marketId,
+        question: data.question,
+        eventSlug,
+        slug: eventSlug,
+        url: `https://polymarket.com/event/${eventSlug}`,
         active: data.active,
         closed: data.closed,
-        // CRITICAL FIX: resolvedBy is often an address that exists even for live markets.
-        // A market is only officially RESOLVED if active=false AND (resolvedBy or UMA status says so).
         resolved: !data.active && !!(data.resolvedBy || data.umaResolutionStatus === 'resolved'),
         outcomePrices: data.outcomePrices,
-        outcomes: outcomes, // Return the names (e.g. ["Up", "Down"])
+        outcomes: outcomes,
         clobTokenIds,
-        endTime: data.endDate ? new Date(data.endDate).getTime() : undefined
+        endTime: data.endDate ? new Date(data.endDate).getTime() : undefined,
+
+        // NEW: Normalized Model
+        model: marketModel
       };
     } catch (e) { return null; }
   }
@@ -118,22 +156,31 @@ export class PolymarketService {
         return null;
       }
 
-      // YES outcome token is at index 1
+      // Default to YES token (index 1) for backward compatibility
+      // For multi-outcome, this might need to change to a specific selected outcome
       const yesTokenId = marketCache.clobTokenIds[1];
       if (!yesTokenId) {
         console.debug(`[ORDERBOOK] Missing YES token for ${marketId.substring(0, 8)}...`);
         return null;
       }
 
-      // Use token_id parameter (CLOB API requirement, not market_id)
-      const url = `https://clob.polymarket.com/book?token_id=${yesTokenId}`;
+      return await this.getOrderBookForToken(yesTokenId, marketId);
+    } catch (e: any) {
+      return null;
+    }
+  }
+
+  public async getOrderBookForToken(tokenId: string, marketIdContext?: string): Promise<OrderBook | null> {
+    try {
+      const url = `https://clob.polymarket.com/book?token_id=${tokenId}`;
+      const contextId = marketIdContext ? marketIdContext.substring(0, 8) : tokenId.substring(0, 8);
 
       const res = await fetch(url, {
         signal: AbortSignal.timeout(3000)
       });
 
       if (!res.ok) {
-        console.debug(`[ORDERBOOK] HTTP ${res.status} for token ${yesTokenId.substring(0, 8)}... (market: ${marketId.substring(0, 8)}...)`);
+        console.debug(`[ORDERBOOK] HTTP ${res.status} for token ${tokenId.substring(0, 8)}...`);
         return null;
       }
 
@@ -141,7 +188,6 @@ export class PolymarketService {
 
       // Validate book structure
       if (!book || typeof book !== 'object') {
-        console.debug(`[ORDERBOOK] Invalid book structure for ${marketId.substring(0, 8)}...`);
         return null;
       }
 
@@ -167,21 +213,22 @@ export class PolymarketService {
         const spread = ((bestAsk - bestBid) / ((bestAsk + bestBid) / 2) * 100).toFixed(2);
         const totalBidDepth = bids.reduce((sum, b) => sum + (b.price * b.size), 0);
         const totalAskDepth = asks.reduce((sum, a) => sum + (a.price * a.size), 0);
+
         if (config.DEBUG_LOGS) console.debug(
-          `[ORDERBOOK ✓] ${marketId.substring(0, 8)}... | Bid: ${bestBid.toFixed(4)} | Ask: ${bestAsk.toFixed(4)} | Spread: ${spread}% | Depth: $${(totalBidDepth + totalAskDepth).toFixed(0)}`
+          `[ORDERBOOK ✓] ${contextId}... | Bid: ${bestBid.toFixed(4)} | Ask: ${bestAsk.toFixed(4)} | Spread: ${spread}% | Depth: $${(totalBidDepth + totalAskDepth).toFixed(0)}`
         );
       } else {
-        if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Empty book for ${marketId.substring(0, 8)}... (bids: ${bids.length}, asks: ${asks.length})`);
+        if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Empty book for ${contextId}...`);
       }
 
       return { bids, asks };
+
     } catch (e: any) {
+      const contextId = marketIdContext ? marketIdContext.substring(0, 8) : tokenId.substring(0, 8);
       if (e.name === 'AbortError') {
-        if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Timeout (3s) fetching ${marketId.substring(0, 8)}...`);
-      } else if (e instanceof TypeError) {
-        if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Network error for ${marketId.substring(0, 8)}...: ${e.message}`);
+        if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Timeout (3s) fetching ${contextId}...`);
       } else {
-        if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Error for ${marketId.substring(0, 8)}...: ${e.message}`);
+        if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Error for ${contextId}...: ${e.message}`);
       }
       return null;
     }

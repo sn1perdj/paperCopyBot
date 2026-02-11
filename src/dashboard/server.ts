@@ -104,9 +104,9 @@ export default class DashboardServer {
         // Single Manual Close
         this.app.post('/api/close', async (req, res) => {
             try {
-                const { marketId, side } = req.body;
-                await this.engine.manualClosePosition(marketId, side);
-                console.log('[TRADE] MANUAL CLOSE:', side, 'on', marketId);
+                const { marketId, side, tokenId, outcomeLabel } = req.body;
+                await this.engine.manualClosePosition(marketId, side, tokenId, outcomeLabel);
+                console.log('[TRADE] MANUAL CLOSE:', outcomeLabel || side, 'on', marketId);
                 res.json({ success: true });
             } catch (e: any) {
                 res.status(500).json({ error: e.message });
