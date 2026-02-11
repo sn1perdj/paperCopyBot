@@ -580,8 +580,14 @@ class TradingEngine {
 
         // Fallback: Binary YES/NO mapping for signals
         if (!selectedOutcome && model.type === 'binary') {
-            if (['YES', '1', 'TRUE', 'UP', 'PASS'].includes(rawOutcomeStr)) selectedOutcome = model.outcomes[1];
-            else if (['NO', '0', 'FALSE', 'DOWN', 'FAIL'].includes(rawOutcomeStr)) selectedOutcome = model.outcomes[0];
+            if (['YES', '1', 'TRUE', 'UP', 'PASS'].includes(rawOutcomeStr)) {
+                // Find "Yes" or "True" outcome
+                selectedOutcome = model.outcomes.find(o => ['YES', 'TRUE', '1'].includes(o.label.toUpperCase()));
+            }
+            else if (['NO', '0', 'FALSE', 'DOWN', 'FAIL'].includes(rawOutcomeStr)) {
+                // Find "No" or "False" outcome
+                selectedOutcome = model.outcomes.find(o => ['NO', 'FALSE', '0'].includes(o.label.toUpperCase()));
+            }
         }
 
         if (!selectedOutcome) {
@@ -591,7 +597,29 @@ class TradingEngine {
 
         const outcomeLabel = selectedOutcome.label;
         const tokenId = selectedOutcome.tokenId;
-        const side: 'YES' | 'NO' = (model.type === 'binary' && model.outcomes[0].tokenId === tokenId) ? 'NO' : 'YES';
+
+        // CRITICAL FIX: Side Determination
+        // 1. For BINARY markets: If token ID matches Index 0 (NO), force side to NO. Else YES.
+        // 2. For MULTI-OUTCOME: Respect the signal's side (YES=Buy, NO=Sell/Short).
+        //    BUT since we cannot "Short" an outcome directly in the simple sense (we sell the token we own),
+        //    we treat both BUY and SELL as operating on the 'YES' token of that outcome.
+        //    The 'SELL' *action* is handled later.
+        let side: 'YES' | 'NO';
+
+        if (model.type === 'binary') {
+            // FIX: Rely on outcome LABEL, not index.
+            // Some markets have ["Yes", "No"] (Index 0 is Yes).
+            // We want side="NO" only if the token corresponds to the "No" outcome.
+            const outcome = model.outcomes.find(o => o.tokenId === tokenId);
+            if (outcome && (outcome.label === 'No' || outcome.label === 'NO')) {
+                side = 'NO';
+            } else {
+                side = 'YES';
+            }
+        } else {
+            // For multi-outcome, we are always trading the Outcome Token itself.
+            side = 'YES';
+        }
 
         // ===== 3. FETCH ORDER BOOK FOR SELECTED OUTCOME =====
         let orderBook: any = null;
@@ -769,7 +797,7 @@ class TradingEngine {
                     marketId,
                     side,
                     CloseTrigger.COPY_TRADER_EVENT,
-                    CloseCause.SELL,
+                    CloseCause.TARGET_SELLOFF, // Explicit reason requested by user
                     executionPrice, // Use calculated execution price
                     tokenId,
                     outcomeLabel
