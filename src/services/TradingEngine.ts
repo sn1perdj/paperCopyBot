@@ -236,7 +236,10 @@ class TradingEngine {
             -pos.size,
             exitPrice,
             `${trigger}-${Date.now()}`,
-            reasonStr
+            reasonStr,
+            0, // sourcePrice - N/A for close
+            0, // latencyMs - N/A for close
+            pos.tokenId // NEW: REQUIRED for position lookup
         );
     }
 
@@ -430,7 +433,7 @@ class TradingEngine {
                 try {
                     const meta = await this.api.getMarketDetails(pos.marketId);
                     if (meta && meta.endTime) {
-                        this.ledger.updateMarketCache(pos.marketId, meta.question, meta.slug, meta.outcomes, meta.clobTokenIds, meta.endTime);
+                        this.ledger.updateMarketCache(pos.marketId, meta.question, meta.slug, meta.outcomes, meta.clobTokenIds, meta.endTime, meta.model);
                         cache = this.ledger.getMarketCache(pos.marketId);
                     }
                 } catch (e) { }
@@ -548,7 +551,7 @@ class TradingEngine {
         let model: NormalizedMarket | undefined;
 
         const cachedMeta = this.ledger.getMarketCache(marketId);
-        if (cachedMeta) {
+        if (cachedMeta && cachedMeta.model) {
             marketName = cachedMeta.question;
             marketSlug = cachedMeta.slug;
             outcomes = cachedMeta.outcomes;
@@ -556,7 +559,7 @@ class TradingEngine {
         } else {
             const meta = await this.api.getMarketDetails(marketId);
             if (meta) {
-                this.ledger.updateMarketCache(marketId, meta.question, meta.slug, meta.outcomes, meta.clobTokenIds, meta.endTime);
+                this.ledger.updateMarketCache(marketId, meta.question, meta.slug, meta.outcomes, meta.clobTokenIds, meta.endTime, meta.model);
                 // Also update local model ref
                 const fresh = this.ledger.getMarketCache(marketId);
                 model = fresh?.model;

@@ -93,14 +93,22 @@ export class MarketResolver {
     const model = details.model;
 
     // 1. Check if we have a Normalized Model (Preferred for Multi-Outcome)
+    // 1. Check if we have a Normalized Model (Preferred for Multi-Outcome)
     if (model && model.outcomes) {
+      // Check 'winner' field in raw details (Legacy / Specific format) - PRIORITIZE
+      if (details.winner) {
+        const w = String(details.winner).toUpperCase();
+        return { label: w, index: -1, side: (w === 'YES' ? 'YES' : (w === 'NO' ? 'NO' : null)) };
+      }
+
       // Check outcome prices (e.g. ["0", "0", "1"])
       if (details.outcomePrices) {
         try {
           const prices = JSON.parse(details.outcomePrices);
           if (Array.isArray(prices)) {
-            // Find index with price 1 (or very close)
-            const winIdx = prices.findIndex((p: any) => Number(p) > 0.99);
+            // Find index with price 1 (Strictly settled)
+            // We use 0.999 to avoid floating point issues but essentially strict
+            const winIdx = prices.findIndex((p: any) => Number(p) >= 0.999);
             if (winIdx !== -1) {
               const label = model.outcomes[winIdx]?.label || null;
               // Map to legacy side if binary
@@ -113,12 +121,6 @@ export class MarketResolver {
             }
           }
         } catch (e) { }
-      }
-
-      // Check 'winner' field in raw details (Legacy / Specific format)
-      if (details.winner) {
-        const w = String(details.winner).toUpperCase();
-        return { label: w, index: -1, side: (w === 'YES' ? 'YES' : (w === 'NO' ? 'NO' : null)) };
       }
     }
 
@@ -141,8 +143,8 @@ export class MarketResolver {
       try {
         const prices = JSON.parse(details.outcomePrices);
         if (Array.isArray(prices) && prices.length === 2) {
-          if (prices[0] === "1" || prices[0] === "1.0") return { label: 'No', index: 0, side: 'NO' };
-          if (prices[1] === "1" || prices[1] === "1.0") return { label: 'Yes', index: 1, side: 'YES' };
+          if (Number(prices[0]) >= 0.999) return { label: 'No', index: 0, side: 'NO' };
+          if (Number(prices[1]) >= 0.999) return { label: 'Yes', index: 1, side: 'YES' };
         }
       } catch (e) { }
     }
@@ -184,9 +186,10 @@ export class MarketResolver {
     // Determine winner using new robust logic
     const winInfo = this.determineWinningOutcome(details);
 
-    // Official Resolution OR Closed with clear winner
-    if (details.resolved || (details.closed && winInfo.index !== null)) {
-      if (config.DEBUG_LOGS) console.log(`[RESOLVER] ${details.slug} -> Resolved/Closed. Winner: ${winInfo.label}`);
+    // Official Resolution OR Closed with clear winner OR Market with definitive price
+    // We allow active markets to resolve if the price/winner is definitive.
+    if (details.resolved || winInfo.label || winInfo.index !== null || winInfo.side) {
+      if (config.DEBUG_LOGS) console.log(`[RESOLVER] ${details.slug} -> Resolved/Closed. Winner: ${winInfo.label || winInfo.side}`);
       return {
         marketId,
         isResolved: true,

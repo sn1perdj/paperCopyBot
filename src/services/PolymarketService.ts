@@ -112,7 +112,7 @@ export class PolymarketService {
         } catch (e) { }
       }
 
-      const marketType = normalizedOutcomes.length === 2 ? 'binary' : 'multi';
+      const marketType: 'binary' | 'multi' = normalizedOutcomes.length === 2 ? 'binary' : 'multi';
 
       const marketModel = {
         id: marketId,

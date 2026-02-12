@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { LedgerSchema, Position, ClosedPosition, TradeEvent, PositionState, CloseTrigger, CloseCause } from '../types.js';
+import { LedgerSchema, Position, ClosedPosition, TradeEvent, PositionState, CloseTrigger, CloseCause, NormalizedMarket } from '../types.js';
 
 class LedgerService {
   private static instance: LedgerService;
@@ -58,7 +58,7 @@ class LedgerService {
     return this.state.marketCache[marketId];
   }
 
-  public updateMarketCache(id: string, question: string, eventSlug: string, outcomes: string[], clobTokenIds: string[] = [], endTime?: number) {
+  public updateMarketCache(id: string, question: string, eventSlug: string, outcomes: string[], clobTokenIds: string[] = [], endTime?: number, model?: NormalizedMarket) {
     this.state.marketCache[id] = {
       id,
       question,
@@ -67,7 +67,8 @@ class LedgerService {
       url: `https://polymarket.com/event/${eventSlug}`,
       outcomes: outcomes,
       clobTokenIds,
-      endTime
+      endTime,
+      model // SAVE MODEL
     };
     this.save();
   }
