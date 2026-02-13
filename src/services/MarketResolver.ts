@@ -89,67 +89,49 @@ export class MarketResolver {
   /*
    * Robustly determine the winner using Normalized Model or Fallbacks
    */
-  private determineWinningOutcome(details: any): { label: string | null, index: number | null, side: 'YES' | 'NO' | null } {
-    const model = details.model;
+  private determineWinningOutcome(details: any): { label: string | null, index: number | null, side: 'YES' | 'NO' | null, resolvedTokenIds?: string[] } {
+    // NEW: Track tokens that are explicitly resolved as 'NO' or 'YES'
+    // Based on your screenshot, Polymarket marks these individually.
+    const resolvedTokens: string[] = [];
 
-    // 1. Check if we have a Normalized Model (Preferred for Multi-Outcome)
-    // 1. Check if we have a Normalized Model (Preferred for Multi-Outcome)
-    if (model && model.outcomes) {
-      // Check 'winner' field in raw details (Legacy / Specific format) - PRIORITIZE
-      if (details.winner) {
-        const w = String(details.winner).toUpperCase();
-        return { label: w, index: -1, side: (w === 'YES' ? 'YES' : (w === 'NO' ? 'NO' : null)) };
-      }
-
-      // Check outcome prices (e.g. ["0", "0", "1"])
-      if (details.outcomePrices) {
-        try {
-          const prices = JSON.parse(details.outcomePrices);
-          if (Array.isArray(prices)) {
-            // Find index with price 1 (Strictly settled)
-            // We use 0.999 to avoid floating point issues but essentially strict
-            const winIdx = prices.findIndex((p: any) => Number(p) >= 0.999);
-            if (winIdx !== -1) {
-              const label = model.outcomes[winIdx]?.label || null;
-              // Map to legacy side if binary
-              let side: 'YES' | 'NO' | null = null;
-              if (model.type === 'binary') {
-                if (winIdx === 1) side = 'YES'; // Index 1 is usually Yes
-                if (winIdx === 0) side = 'NO';
-              }
-              return { label, index: winIdx, side };
-            }
-          }
-        } catch (e) { }
+    // 1. Check for individual outcome resolutions in Multi-Outcome markets
+    if (details.clobTokenIds && details.outcomes) {
+      // Some API responses include an array of statuses for each outcome
+      if (details.outcomeStatuses) {
+        details.outcomeStatuses.forEach((status: string, idx: number) => {
+          if (status === 'resolved') resolvedTokens.push(details.clobTokenIds[idx]);
+        });
       }
     }
 
-    // 2. Fallback to Legacy Logic (if no model)
-    // Check explicit winner field
+    // 2. Strict Parent Resolution check (for binary/standard markets)
+    // If parent is not resolved AND no children are resolved, we stop.
+    if (!details.resolved && resolvedTokens.length === 0) {
+      return { label: null, index: null, side: null };
+    }
+
+    // Once details.resolved is true, we can safely look for the winner
     if (details.winner) {
       const w = String(details.winner).toUpperCase();
-      if (w === 'YES' || w === '1' || w === 'TRUE') return { label: 'Yes', index: 1, side: 'YES' };
-      if (w === 'NO' || w === '0' || w === 'FALSE') return { label: 'No', index: 0, side: 'NO' };
+      return {
+        label: w,
+        index: -1,
+        side: (w === 'YES' ? 'YES' : (w === 'NO' ? 'NO' : null)),
+        resolvedTokenIds: resolvedTokens
+      };
     }
 
-    // Check legacy resolvedBy logic
-    if (details.resolved && details.resolvedBy) {
-      if ((details as any).winner === 'YES' || (details as any).winner === '1') return { label: 'Yes', index: 1, side: 'YES' };
-      if ((details as any).winner === 'NO' || (details as any).winner === '0') return { label: 'No', index: 0, side: 'NO' };
-    }
-
-    // Check outcome prices (Legacy binary assumption)
+    // Fallback for multi-outcome only IF resolved is true
     if (details.outcomePrices) {
       try {
         const prices = JSON.parse(details.outcomePrices);
-        if (Array.isArray(prices) && prices.length === 2) {
-          if (Number(prices[0]) >= 0.999) return { label: 'No', index: 0, side: 'NO' };
-          if (Number(prices[1]) >= 0.999) return { label: 'Yes', index: 1, side: 'YES' };
+        const winIdx = prices.findIndex((p: any) => Number(p) >= 0.99);
+        if (winIdx !== -1) {
+          return { label: null, index: winIdx, side: null, resolvedTokenIds: resolvedTokens };
         }
       } catch (e) { }
     }
-
-    return { label: null, index: null, side: null };
+    return { label: null, index: null, side: null, resolvedTokenIds: resolvedTokens };
   }
 
   /**
@@ -181,15 +163,10 @@ export class MarketResolver {
     }
 
     const details = result.data;
-    const slug = details.slug || '';
-
-    // Determine winner using new robust logic
     const winInfo = this.determineWinningOutcome(details);
 
-    // Official Resolution OR Closed with clear winner OR Market with definitive price
-    // We allow active markets to resolve if the price/winner is definitive.
-    if (details.resolved || winInfo.label || winInfo.index !== null || winInfo.side) {
-      if (config.DEBUG_LOGS) console.log(`[RESOLVER] ${details.slug} -> Resolved/Closed. Winner: ${winInfo.label || winInfo.side}`);
+    // CHANGE: Strictly require details.resolved AND a winner to be found
+    if (details.resolved && (winInfo.label || winInfo.index !== null || winInfo.side)) {
       return {
         marketId,
         isResolved: true,
@@ -203,26 +180,18 @@ export class MarketResolver {
       };
     }
 
-    // Check if closed (accepting no more trades, but not yet resolved)
-    if (details.closed) {
-      if (config.DEBUG_LOGS) console.log(`[RESOLVER] Market ${marketId.substring(0, 8)}... is CLOSED (waiting for resolution)`);
+    // Handle "Closed" state: Trading ended but oracle hasn't resolved.
+    if (details.closed || details.active === false) {
       return {
         marketId,
-        isResolved: false,
+        isResolved: false, // Keep false!
         source: 'metadata',
         confidence: 'high',
-        resolvedAt: undefined,
-        marketSlug: slug
+        marketSlug: details.slug
       };
     }
 
-    return {
-      marketId,
-      isResolved: false,
-      source: 'metadata',
-      confidence: 'medium',
-      marketSlug: slug
-    };
+    return { marketId, isResolved: false, source: 'metadata', confidence: 'medium' };
   }
 
 

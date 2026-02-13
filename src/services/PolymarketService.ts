@@ -135,6 +135,9 @@ export class PolymarketService {
         closed: data.closed,
         resolved: !data.active && !!(data.resolvedBy || data.umaResolutionStatus === 'resolved'),
         outcomePrices: data.outcomePrices,
+        outcomeStatuses: data.outcomeStatuses, // NEW: For partial resolution
+        winnerTokenId: data.winnerTokenId,     // NEW: For specific winner
+        winner: data.winner,                   // NEW: Legacy winner field
         outcomes: outcomes,
         clobTokenIds,
         endTime: data.endDate ? new Date(data.endDate).getTime() : undefined,

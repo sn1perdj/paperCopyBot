@@ -232,6 +232,26 @@ class LedgerService {
       existing.investedUsd -= costBasisOfSold;
       existing.realizedPnL += pnl;
 
+      // FIX: Check if this is a system-triggered settlement vs a trader sell
+      const isSettlement = actionReason.includes('RESOLUTION') || actionReason.includes('MARKET_RESOLUTION');
+
+      if (!isSettlement) {
+        this.state.tradeEvents.unshift({
+          eventId: txHash,
+          timestamp: Date.now(),
+          marketId, marketName: finalName, marketSlug: marketSlug,
+          type: 'SELL',
+          side,
+          outcomeLabel: outcomeLabel,
+          tokenId: tokenId || (existing?.tokenId),
+          quantity: Math.abs(sizeShares),
+          price,
+          usdValue: costUsd,
+          sourcePrice,
+          latencyMs
+        });
+      }
+
       // Check if fully closed (or effectively closed)
       if (existing.size < 0.1) {
         // PARSE ACTION REASON for Trigger/Cause
@@ -273,8 +293,8 @@ class LedgerService {
       }
     }
 
-
-
+    // START_OLD_LOG_BLOCK
+    /*
     this.state.tradeEvents.unshift({
       eventId: txHash,
       timestamp: Date.now(),
@@ -289,6 +309,25 @@ class LedgerService {
       sourcePrice,
       latencyMs
     });
+    */
+    // END_OLD_LOG_BLOCK
+
+    if (isBuy) {
+      this.state.tradeEvents.unshift({
+        eventId: txHash,
+        timestamp: Date.now(),
+        marketId, marketName: finalName, marketSlug: marketSlug,
+        type: 'BUY',
+        side,
+        outcomeLabel: outcomeLabel,
+        tokenId: tokenId || (existing?.tokenId),
+        quantity: Math.abs(sizeShares),
+        price,
+        usdValue: costUsd,
+        sourcePrice,
+        latencyMs
+      });
+    }
 
     markAsProcessed();
     return true;

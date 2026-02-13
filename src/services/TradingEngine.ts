@@ -367,55 +367,60 @@ class TradingEngine {
     // --- WATCHDOG (Resolution Monitoring) ---
     private async runWatchdog() {
         const positions = this.ledger.getPositions();
-        const openMarkets = Object.keys(positions);
-        if (openMarkets.length === 0) return;
+        if (Object.keys(positions).length === 0) return;
 
-        const uniqueIds = [...new Set(Object.values(positions).map(p => p.marketId))];
-
-        for (const marketId of uniqueIds) {
+        // Iterate positions individually to handle partial resolutions (e.g. Multi-Outcome)
+        for (const pos of Object.values(positions)) {
             try {
-                // Check actual market resolution status (not price-based)
-                const resolutionStatus = await this.marketResolver.checkResolution(marketId);
+                const meta = await this.api.getMarketDetails(pos.marketId);
+                if (!meta) continue;
 
-                if (resolutionStatus.isResolved) {
+                // 1. Identify Outcome Index if missing
+                let outcomeIndex = -1;
+                if (meta.clobTokenIds && pos.tokenId) {
+                    outcomeIndex = meta.clobTokenIds.indexOf(pos.tokenId);
+                }
+
+                // 2. Check Resolution (Global OR Partial)
+                const isGlobalResolved = meta.resolved;
+                const isPartialResolved = meta.outcomeStatuses && outcomeIndex !== -1 && meta.outcomeStatuses[outcomeIndex] === 'resolved';
+
+                if (isGlobalResolved || isPartialResolved) {
+                    // Determine Winner
+                    // For active multi-outcome markets, if one token is resolved, check if it's the winner
+                    // If meta.winnerTokenId exists, use it. 
+                    // Otherwise, falling back to price or assuming 0 if 'resolved' but not 'winner' might be risky?
+                    // User logic: "const isWinner = meta.winnerTokenId === pos.tokenId;"
+
+                    let isWinner = false;
+
+                    if (meta.winnerTokenId && pos.tokenId) {
+                        isWinner = meta.winnerTokenId === pos.tokenId;
+                    } else if (meta.winner) {
+                        // Binary / old model
+                        const w = String(meta.winner).toUpperCase();
+                        if (w === 'YES' && pos.side === 'YES') isWinner = true;
+                        if (w === 'NO' && pos.side === 'NO') isWinner = true;
+                        if (pos.outcomeLabel && w === pos.outcomeLabel.toUpperCase()) isWinner = true;
+                    }
+
                     if (config.DEBUG_LOGS) console.log(
-                        `\n[WATCHDOG] Market ${marketId.substring(0, 8)}... is RESOLVED. ` +
-                        `Winner: ${resolutionStatus.winningOutcomeLabel || resolutionStatus.winningSide || 'TBD'} (Source: ${resolutionStatus.source})`
+                        `\n[WATCHDOG] Position ${pos.marketName} (${pos.outcomeLabel}) resolved. Winner: ${isWinner}`
                     );
 
-                    // Settle all positions in this market
-                    const marketPositions = Object.values(positions).filter(p => p.marketId === marketId);
-
-                    for (const pos of marketPositions) {
-                        // Determine if this specific position won
-                        let isWinner = false;
-                        if (resolutionStatus.winningOutcomeIndex !== undefined && pos.tokenId) {
-                            const meta = this.ledger.getMarketCache(marketId);
-                            if (meta && meta.clobTokenIds) {
-                                const winTokenId = meta.clobTokenIds[resolutionStatus.winningOutcomeIndex];
-                                if (winTokenId === pos.tokenId) isWinner = true;
-                            }
-                        } else if (resolutionStatus.winningOutcomeLabel && pos.outcomeLabel) {
-                            if (resolutionStatus.winningOutcomeLabel.toUpperCase() === pos.outcomeLabel.toUpperCase()) isWinner = true;
-                        } else if (resolutionStatus.winningSide) {
-                            if (resolutionStatus.winningSide === pos.side) isWinner = true;
-                        }
-
-                        const reason = `RESOLUTION: Winner=${resolutionStatus.winningOutcomeLabel || resolutionStatus.winningSide || 'Unknown'}`;
-                        await this.settlePosition(
-                            marketId,
-                            pos.side,
-                            reason,
-                            resolutionStatus.winningSide,
-                            pos.tokenId,
-                            pos.outcomeLabel,
-                            isWinner
-                        );
-                    }
+                    await this.settlePosition(
+                        pos.marketId,
+                        pos.side,
+                        `MARKET_RESOLUTION|${isWinner ? 'WINNER' : 'LOSER'}`,
+                        undefined,
+                        pos.tokenId,
+                        pos.outcomeLabel,
+                        isWinner
+                    );
                 }
+
             } catch (err: any) {
-                console.error(`[WATCHDOG] Error checking resolution for ${marketId.substring(0, 8)}...:`, err.message);
-                // Continue with other markets if one fails
+                console.error(`[WATCHDOG] Error checking resolution for ${pos.marketName.substring(0, 10)}...:`, err.message);
             }
         }
     }
@@ -423,7 +428,6 @@ class TradingEngine {
     private async checkExpirations() {
         const now = Date.now();
         const positionsArray = Object.values(this.ledger.getPositions());
-        if (positionsArray.length === 0) return;
 
         for (const pos of positionsArray) {
             let cache = this.ledger.getMarketCache(pos.marketId);
@@ -439,20 +443,10 @@ class TradingEngine {
                 } catch (e) { }
             }
 
-            if (cache && cache.endTime) {
-                if (now >= cache.endTime) {
-                    // EXPIRED -> Trigger Guard Close
-                    // FIX: Watchdog will handle resolution. Do NOT close prematurely.
-                    if (config.DEBUG_LOGS) console.log(`[EXPIRATION-WATCH] Market ${pos.marketId} expired. Holding for resolution.`);
-
-                    // We only close if NOT already closing/closed (handled by tryClosePosition checks)
-                    /* await this.tryClosePosition(
-                        pos.marketId,
-                        pos.side,
-                        CloseTrigger.SYSTEM_GUARD,
-                        CloseCause.MARKET_EXPIRED
-                    ); */
-                }
+            if (cache && cache.endTime && now >= cache.endTime) {
+                // FIX: Just log it. Do NOT call tryClosePosition here.
+                // The runWatchdog() method will handle resolution when it's official.
+                if (config.DEBUG_LOGS) console.log(`[WATCHDOG] ${pos.marketName} trading ended. Waiting for target sell or oracle.`);
             }
         }
     }

@@ -25,6 +25,12 @@ export interface MarketMetadata {
   clobTokenIds?: string[];
   endTime?: number;
 
+  // New Fields for Resolution Logic
+  resolved?: boolean;
+  outcomeStatuses?: string[];
+  winnerTokenId?: string;
+  winner?: string;
+
   // New Normalized Field
   model?: NormalizedMarket;
 }
