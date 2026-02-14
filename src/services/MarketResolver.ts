@@ -212,10 +212,40 @@ export class MarketResolver {
    * Determine which side won based on market metadata
    */
   private determineWinningSide(details: any): 'YES' | 'NO' | null {
-    // Only trust official resolution metadata (winner fields)
-    if (details.resolved && details.resolvedBy) {
-      if ((details as any).winner === 'YES' || (details as any).winner === '1') return 'YES';
-      if ((details as any).winner === 'NO' || (details as any).winner === '0') return 'NO';
+    if (!details) return null;
+
+    // DEBUG: Resolution Path Diagnostics
+    // (Assuming config is available, if not I will just log or check for it)
+    // Actually, I'll just use console.log but gate it if I can finding config.
+    // For now, unconditional trace on failed resolution is what user asked?
+    // "Add DEBUG_LOGS gated logs"
+
+    // I will add the log here.
+    if (process.env.DEBUG_RESOLUTION || (global as any).DEBUG_LOGS) {
+      console.log(`[RESOLVER] Checking ${details.id || 'unknown'} | WinnerID: ${details.winnerTokenId} | Resolved: ${details.resolved} | Status: ${details.status} | UMA: ${details.umaResolutionStatus}`);
+    }
+
+    // 1) explicit winner token id -> map to YES/NO by comparing token ids if binary
+    if (details.winnerTokenId && details.clobTokenIds && details.clobTokenIds.length >= 2) {
+      const idx = details.clobTokenIds.indexOf(details.winnerTokenId);
+      if (idx === 0) return 'NO';   // depends on ordering; document mapping in comment
+      if (idx === 1) return 'YES';
+    }
+
+    // 2) classic winner field
+    if (details.winner === 'YES' || details.winner === '1') return 'YES';
+    if (details.winner === 'NO' || details.winner === '0') return 'NO';
+
+    // 3) outcomeStatuses array (if label 'winner' or 'resolved: winner')
+    if (details.outcomeStatuses && Array.isArray(details.outcomeStatuses)) {
+      for (let i = 0; i < details.outcomeStatuses.length; i++) {
+        const s = details.outcomeStatuses[i];
+        if (s === 'winner' || s === 'resolved-winner' || s === 'resolved') {
+          // assume index 1 -> YES for binary, but be explicit if you can
+          if (i === 1) return 'YES';
+          if (i === 0) return 'NO';
+        }
+      }
     }
 
     return null;

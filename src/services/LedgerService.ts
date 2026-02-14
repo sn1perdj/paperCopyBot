@@ -60,6 +60,12 @@ class LedgerService {
   }
 
   public updateMarketCache(id: string, question: string, eventSlug: string, outcomes: string[], clobTokenIds: string[] = [], endTime?: number, model?: NormalizedMarket) {
+    // Normalize endTime to milliseconds if it looks like seconds (small integer vs large integer)
+    let finalEndTime = endTime;
+    if (finalEndTime && finalEndTime < 10000000000) { // Less than 10 billion (seconds < year 2286)
+      finalEndTime = finalEndTime * 1000;
+    }
+
     this.state.marketCache[id] = {
       id,
       question,
@@ -68,7 +74,7 @@ class LedgerService {
       url: `https://polymarket.com/event/${eventSlug}`,
       outcomes: outcomes,
       clobTokenIds,
-      endTime,
+      endTime: finalEndTime,
       model // SAVE MODEL
     };
     this.save();
@@ -168,17 +174,27 @@ class LedgerService {
     const isBuy = sizeShares > 0;
 
     // NEW ROBUST POSITION KEY: Use tokenId if available, else side-label fallback
-    let posKey = tokenId ? `${marketId}-${tokenId}` : `${marketId}-${side}-${outcomeLabel}`;
+    const canonicalKey = tokenId ? `${marketId}-${tokenId}` : `${marketId}-${side}-${outcomeLabel}`;
+    let posKey = canonicalKey;
     let existing = this.state.positions[posKey];
 
-    // FALLBACK: Check for Legacy Key (MarketId-Side) if explicit key not found
+    // FALLBACK & MIGRATION: Check for Legacy Key (MarketId-Side)
     if (!existing) {
       const legacyKey = `${marketId}-${side}`;
       if (this.state.positions[legacyKey]) {
-        // We found a legacy position! Use it.
-        // Option: We could migrate it here, but for now just use it.
-        existing = this.state.positions[legacyKey];
-        posKey = legacyKey;
+        // Found legacy position -> MIGRATE to Canonical Key
+        console.log(`[LEDGER] Migrating legacy position ${legacyKey} -> ${canonicalKey}`);
+        this.state.positions[canonicalKey] = {
+          ...this.state.positions[legacyKey],
+          positionId: canonicalKey, // Set new ID
+          tokenId: tokenId || this.state.positions[legacyKey].tokenId // Ensure tokenId is set
+        };
+        delete this.state.positions[legacyKey];
+
+        // Update reference
+        posKey = canonicalKey;
+        existing = this.state.positions[posKey];
+        this.save();
       }
     }
 
@@ -220,12 +236,14 @@ class LedgerService {
         existing.marketSlug = marketSlug;
         existing.outcomeLabel = outcomeLabel;
         existing.tokenId = tokenId || existing.tokenId;
+        existing.positionId = existing.positionId || posKey; // Backfill if missing
         existing.state = PositionState.OPEN; // Re-affirm OPEN on buy
       } else {
         this.state.positions[posKey] = {
           marketId, marketName: finalName, marketSlug, side,
           outcomeLabel,
           tokenId,
+          positionId: posKey, // Store Canonical ID
           size: sizeShares,
           entryPrice: price,
           entryTick: tickPrice, // STORE TICK

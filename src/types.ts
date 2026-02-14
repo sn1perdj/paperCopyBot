@@ -105,6 +105,7 @@ export interface Position {
   closeCause?: CloseCause;
   closePriority?: number;
   lastEntryTime?: number; // timestamp of entry for min hold check
+  positionId?: string; // NEW: Canonical ID (e.g. marketId-tokenId)
 }
 
 export interface ClosedPosition {

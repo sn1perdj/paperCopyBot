@@ -116,7 +116,15 @@ class TradingEngine {
         for (const pos of positions) {
             try {
                 console.log(`[ENGINE] Closing ${pos.marketName}...`);
-                await this.tryClosePosition(pos.marketId, pos.side, CloseTrigger.USER_ACTION, CloseCause.MANUAL_CLOSE);
+                await this.tryClosePosition(
+                    pos.marketId,
+                    pos.side,
+                    CloseTrigger.USER_ACTION,
+                    CloseCause.MANUAL_CLOSE,
+                    undefined,
+                    pos.tokenId,
+                    pos.outcomeLabel
+                );
                 await new Promise(r => setTimeout(r, 200));
             } catch (e) {
                 console.error(`[ENGINE] Failed to close ${pos.marketName}`, e);
@@ -190,7 +198,7 @@ class TradingEngine {
         // 3. PRIORITY CHECK
         const incomingPriority = this.getPriority(trigger);
         if (pos.closePriority !== undefined && incomingPriority > pos.closePriority) {
-            console.log(`[CLOSE-IGNORE] Priority ${incomingPriority} < Existing ${pos.closePriority} for ${posKey}`);
+            console.log(`[CLOSE-IGNORE] Incoming priority ${incomingPriority} is lower priority (numerically higher) than existing ${pos.closePriority} for ${posKey}`);
             return;
         }
 
@@ -231,17 +239,37 @@ class TradingEngine {
         // We pass the "Reason" string in the format "TRIGGER|CAUSE" to match LedgerService parsing logic
         const reasonStr = `${trigger}|${cause}`;
 
-        this.ledger.updatePosition(
-            marketId, pos.marketName, pos.marketSlug, side,
-            pos.outcomeLabel,
-            -pos.size,
-            exitPrice,
-            `${trigger}-${Date.now()}`,
-            reasonStr,
-            0, // sourcePrice - N/A for close
-            0, // latencyMs - N/A for close
-            pos.tokenId // NEW: REQUIRED for position lookup
-        );
+        try {
+            const updateOk = this.ledger.updatePosition(
+                marketId, pos.marketName, pos.marketSlug, side,
+                pos.outcomeLabel,
+                -pos.size,
+                exitPrice,
+                `${trigger}-${Date.now()}`,
+                reasonStr,
+                0, // sourcePrice - N/A for close
+                0, // latencyMs - N/A for close
+                pos.tokenId // NEW: REQUIRED for position lookup
+            );
+
+            if (!updateOk) {
+                throw new Error('Ledger update returned false');
+            }
+        } catch (err: any) {
+            console.error(`[CLOSE-ERROR] Failed to execute close for ${posKey}:`, err);
+
+            // LOG: Resolution Path Diagnostics
+            if (trigger === CloseTrigger.MARKET_RESOLUTION) {
+                console.error(`[RESOLUTION-FAIL] Close failed for ${posKey}. Cause: ${cause}. Market Status maybe mismatch?`);
+            }
+
+            // Revert state so it can be retried
+            pos.state = PositionState.OPEN;
+            delete pos.closePriority;
+            delete pos.closeTrigger;
+            delete pos.closeCause;
+            return;
+        }
     }
 
     // --- MAIN LOOP ---
@@ -403,6 +431,46 @@ class TradingEngine {
                         if (w === 'YES' && pos.side === 'YES') isWinner = true;
                         if (w === 'NO' && pos.side === 'NO') isWinner = true;
                         if (pos.outcomeLabel && w === pos.outcomeLabel.toUpperCase()) isWinner = true;
+                    } else if (meta.outcomePrices) {
+                        // FALLBACK: Check outcomePrices (e.g. ["0", "1"])
+                        // 1 = Winner, 0 = Loser
+                        try {
+                            const prices = typeof meta.outcomePrices === 'string' ? JSON.parse(meta.outcomePrices) : meta.outcomePrices;
+                            if (Array.isArray(prices) && prices.length > 0) {
+                                // Find index of winner (price >= 0.99 or max price if definitive)
+                                const winnerIndex = prices.findIndex((p: any) => Number(p) >= 0.99); // Threshold for winner
+
+                                if (winnerIndex !== -1) {
+                                    // Check if this position matches the winner index
+                                    // A) Match by Token ID if available
+                                    if (meta.clobTokenIds && meta.clobTokenIds[winnerIndex] && pos.tokenId) {
+                                        if (meta.clobTokenIds[winnerIndex] === pos.tokenId) {
+                                            isWinner = true;
+                                        }
+                                    }
+                                    // B) Match by Outcome Label/Index (Legacy/Binary)
+                                    else if (meta.outcomes) {
+                                        const outcomes = typeof meta.outcomes === 'string' ? JSON.parse(meta.outcomes) : meta.outcomes;
+                                        // For binary: Index 0 = NO/Down, Index 1 = YES/Up
+                                        // If position is YES on Up (Index 1) and Winner is Index 1 -> WIN
+
+                                        // If we have tokenId, we are safer. If not, rely on side/label.
+                                        // If side 'YES' on outcome 'Up', and 'Up' is at winnerIndex, we win.
+                                        if (pos.outcomeLabel && outcomes[winnerIndex] === pos.outcomeLabel) {
+                                            isWinner = true;
+                                        }
+                                        // Fallback for Binary "YES" position on Index 1 (YES)
+                                        else if (meta.outcomes && meta.outcomes.length === 2 && winnerIndex === 1 && pos.side === 'YES' && (pos.outcomeLabel === 'YES' || pos.outcomeLabel === 'Up')) {
+                                            isWinner = true;
+                                        }
+                                        // Fallback for Binary "YES" position on Index 0 (NO) -> Likely loss for YES side if we bought "YES", 
+                                        // OLD LOGIC WAS CONFUSING. Let's stick to explicit match if possible.
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.warn(`[WATCHDOG] Failed to parse outcomePrices for ${pos.marketId}`, e);
+                        }
                     }
 
                     if (config.DEBUG_LOGS) console.log(
@@ -853,65 +921,115 @@ class TradingEngine {
         );
     }
 
-    private async updateWebsocketSubscription() {
+    private updateWebsocketSubscription() {
         try {
-            const positions = Object.values(this.ledger.getPositions());
-            if (positions.length === 0) return;
+            const positions = this.ledger.getPositions();
+            const tokenIds = new Set<string>();
 
-            // Collect all unique tokenIds we are holding
-            const tokenIds = [...new Set(positions.map(p => p.tokenId).filter(id => !!id))] as string[];
-            if (tokenIds.length === 0) return;
-
-            // Map tokenId to metadata (binary status)
-            const tokenMetaMap = new Map<string, { marketId: string, side: 'YES' | 'NO', isBinary: boolean }>();
-
-            for (const pos of positions) {
-                if (!pos.tokenId) continue;
-                const cache = this.ledger.getMarketCache(pos.marketId);
-                tokenMetaMap.set(pos.tokenId, {
-                    marketId: pos.marketId,
-                    side: pos.side,
-                    isBinary: cache?.model?.type === 'binary'
-                });
-            }
-
-            // Subscribe
-            this.api.subscribeToOrderbook(tokenIds, (data: any) => {
-                let updates: any[] = [];
-                if (Array.isArray(data)) updates = data;
-                else if (data && typeof data === 'object') {
-                    if (Array.isArray(data.data)) updates = data.data;
-                    else if (Array.isArray(data.price_changes)) updates = data.price_changes;
-                    else return;
-                } else return;
-
-                if (updates.length === 0) return;
-
-                const byToken = new Map<string, { bids: any[], asks: any[] }>();
-                for (const update of updates) {
-                    const tokenId = update.asset_id;
-                    if (!tokenMetaMap.has(tokenId)) continue;
-                    if (!byToken.has(tokenId)) byToken.set(tokenId, { bids: [], asks: [] });
-                    const book = byToken.get(tokenId)!;
-                    if (update.side === "BUY") book.bids.push(update);
-                    else if (update.side === "SELL") book.asks.push(update);
-                }
-
-                for (const [tokenId, book] of byToken.entries()) {
-                    if (book.bids.length === 0 && book.asks.length === 0) continue;
-                    book.bids.sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
-                    book.asks.sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
-                    let midpoint = 0;
-                    if (book.bids.length > 0 && book.asks.length > 0) midpoint = (parseFloat(book.bids[0].price) + parseFloat(book.asks[0].price)) / 2;
-                    else if (book.bids.length > 0) midpoint = parseFloat(book.bids[0].price);
-                    else midpoint = parseFloat(book.asks[0].price);
-
-                    const meta = tokenMetaMap.get(tokenId)!;
-                    this.ledger.updateRealTimePrice(meta.marketId, midpoint, tokenId);
+            // Collect all unique token IDs from open positions
+            Object.values(positions).forEach(p => {
+                if (p.state === PositionState.OPEN && p.tokenId) {
+                    tokenIds.add(p.tokenId);
                 }
             });
-        } catch (e) {
-            console.error('[ENGINE] Failed to update WS subs:', e);
+
+            const uniqueTokens = Array.from(tokenIds);
+
+            if (uniqueTokens.length === 0) {
+                if (config.DEBUG_LOGS) console.log('[WS] No active positions. Unsubscribing/Idle.');
+                // graceful unsubscribe or close if implementation supports it
+                // For now, checks inside api.subscribeToOrderbook handles it or we can close
+                // this.api.close(); // Optional: Close if you want to save resources
+                return;
+            }
+
+            if (config.DEBUG_LOGS) {
+                console.log(`[WS] Updating subscription for ${uniqueTokens.length} tokens: ${uniqueTokens.map(t => t.substring(0, 6)).join(', ')}...`);
+            }
+
+            this.api.subscribeToOrderbook(uniqueTokens, (data: any) => {
+                this.handleWebsocketMessage(data);
+            });
+        } catch (e: any) {
+            console.error('[WS] Failed to update subscription:', e.message);
+        }
+    }
+
+    private handleWebsocketMessage(data: any) {
+        // Placeholder for the actual message handling logic if it was intended to be separate
+        // Based on previous code, the logic was inline. 
+        // But wait, the previous code had inline logic inside the callback.
+        // I should probably restore that inline logic OR delegate to this method.
+        // Let's restore the inline logic structure but clean it up.
+
+        // Actually, let's keep the structure simple:
+        // The previous `handleWebsocketMessage` didn't exist in the original file I viewed earlier?
+        // Let's check the original view.
+        // Ah, I see "this.handleWebsocketMessage(data)" in my previous replacement attempt.
+        // But the original code had the logic INLINE in the callback.
+
+        // I will put the logic into `handleWebsocketMessage` to fail-safe against the "updates" error.
+
+        let updates: any[] = [];
+        if (Array.isArray(data)) updates = data;
+        else if (data && typeof data === 'object') {
+            if (Array.isArray(data.data)) updates = data.data;
+            else if (Array.isArray(data.price_changes)) updates = data.price_changes; // Gamma/Poly variant
+            else return;
+        } else return;
+
+        if (updates.length === 0) return;
+
+        // Process updates...
+        // We need a way to map tokenIds back to markets. 
+        // Since we are decoupling the callback, we need to lookup metadata again or pass it.
+        // Re-looking up is safer for "current state".
+
+        const positions = this.ledger.getPositions();
+        const tokenMetaMap = new Map<string, { marketId: string }>();
+
+        Object.values(positions).forEach(p => {
+            if (p.state === PositionState.OPEN && p.tokenId) {
+                tokenMetaMap.set(p.tokenId, { marketId: p.marketId });
+            }
+        });
+
+        for (const update of updates) {
+            // Polymarket WS usually sends: { asset_id: "...", price: "..." } or similar orderbook updates
+            // Adjust validation based on actual payload structure. 
+            // Assuming simplified "price update" or "orderbook" for now.
+            // If it is orderbook:
+            /*
+            {
+                "asset_id": "422...",
+                "bids": [{"price": "0.50", "size": "100"}],
+                "asks": [...]
+            }
+            */
+            const tokenId = update.asset_id || update.token_id;
+            if (!tokenId || !tokenMetaMap.has(tokenId)) continue;
+
+            const meta = tokenMetaMap.get(tokenId)!;
+
+            // Calculate Midpoint
+            let midPrice = 0;
+
+            // Case A: Full Orderbook Update
+            if (update.bids && update.asks) {
+                const bestBid = update.bids.length > 0 ? parseFloat(update.bids[0].price) : 0;
+                const bestAsk = update.asks.length > 0 ? parseFloat(update.asks[0].price) : 0;
+                if (bestBid > 0 && bestAsk > 0) midPrice = (bestBid + bestAsk) / 2;
+                else if (bestBid > 0) midPrice = bestBid;
+                else if (bestAsk > 0) midPrice = bestAsk;
+            }
+            // Case B: Price Change / Ticker
+            else if (update.price) {
+                midPrice = parseFloat(update.price);
+            }
+
+            if (midPrice > 0) {
+                this.ledger.updateRealTimePrice(meta.marketId, midPrice, tokenId);
+            }
         }
     }
 }

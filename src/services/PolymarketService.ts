@@ -113,6 +113,21 @@ export class PolymarketService {
         } catch (e) { }
       }
 
+      // NEW: Robust Resolution Check
+      // Checks multiple fields as API response schemas vary
+      // REVISION 2: We must trust `winnerTokenId` even if market is 'active' because Polymarket
+      // often leaves markets active during the challenge period after the winner is declared.
+      const resolvedFlag =
+        !!data.resolved ||
+        (data.status === 'resolved') ||
+        (data.umaResolutionStatus === 'resolved') ||
+        !!data.winnerTokenId ||
+        (Array.isArray(data.outcomeStatuses) && data.outcomeStatuses.length > 0 && data.outcomeStatuses.every((s: string) => s === 'resolved'));
+
+      if (config.DEBUG_LOGS && resolvedFlag && data.active) {
+        console.warn(`[POLY-WARN] Active market ${marketId} flagged as resolved! Flags: resolved=${data.resolved}, by=${data.resolvedBy}, uma=${data.umaResolutionStatus}, status=${data.status}, winnerId=${data.winnerTokenId}, outcomes=${JSON.stringify(data.outcomeStatuses)}`);
+      }
+
       const marketType: 'binary' | 'multi' = normalizedOutcomes.length === 2 ? 'binary' : 'multi';
 
       const marketModel = {
@@ -121,9 +136,11 @@ export class PolymarketService {
         slug: eventSlug,
         type: marketType,
         outcomes: normalizedOutcomes,
-        isResolved: !data.active && !!(data.resolvedBy || data.umaResolutionStatus === 'resolved'),
+        isResolved: resolvedFlag,
         endDate: data.endDate ? new Date(data.endDate).getTime() : undefined
       };
+
+
       // === NORMALIZATION END ===
 
       return {
@@ -134,7 +151,7 @@ export class PolymarketService {
         url: `https://polymarket.com/event/${eventSlug}`,
         active: data.active,
         closed: data.closed,
-        resolved: !data.active && !!(data.resolvedBy || data.umaResolutionStatus === 'resolved'),
+        resolved: resolvedFlag,
         outcomePrices: data.outcomePrices,
         outcomeStatuses: data.outcomeStatuses, // NEW: For partial resolution
         winnerTokenId: data.winnerTokenId,     // NEW: For specific winner

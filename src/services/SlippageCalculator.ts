@@ -43,18 +43,11 @@ export class SlippageCalculator {
     const slippageTicks = Math.floor(baseTick * slippage);
 
     if (isBuy) {
-      // For BUY: Adjusted = Base - Slippage (Lower price is better, but this logic seems to imply "Max Pay"? 
-      // WAIT. 
-      // User Example for BUY: "clampTick(baseTick - slippageTicks)"
-      // User Example for SELL: "clampTick(baseTick + slippageTicks)"
-      // Usually for BUY, you accept a HIGHER price (Worst Case). 
-      // But if "sourcePrice" is the price we WANT, maybe "slippage" here means "Limit Price"?
-      // Use EXACTLY what user provided in Phase 3.
-
-      return clampTick(baseTick - slippageTicks);
-    } else {
-      // For SELL
+      // For BUY: Adjusted = Base + Slippage (Allow HIGHER price for entry/buy)
       return clampTick(baseTick + slippageTicks);
+    } else {
+      // For SELL: Adjusted = Base - Slippage (Allow LOWER price for exit/sell)
+      return clampTick(baseTick - slippageTicks);
     }
   }
 

@@ -43,7 +43,7 @@ export default class DashboardServer {
                     currentPrice: p.currentPrice ?? null,
                     currentValue: p.currentValue ?? null,
                     unrealizedPnL: p.unrealizedPnL ?? null,
-                    endTime: cache ? cache.endTime : undefined
+                    endTime: (cache && cache.endTime) ? (cache.endTime < 10000000000 ? cache.endTime * 1000 : cache.endTime) : undefined
                 };
             });
 
