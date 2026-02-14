@@ -10,7 +10,7 @@ export const FeatureSwitches = {
      * 
      * If false: The bot will ignore existing positions and copy every trade event it sees, potentially doubling down.
      */
-    SKIP_ACTIVE_POSITIONS: true,
+    SKIP_ACTIVE_POSITIONS: false,
 
     /**
      * ENABLE_WEATHER_GUARD

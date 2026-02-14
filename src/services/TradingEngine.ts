@@ -9,6 +9,7 @@ import RetryHelper from './RetryHelper.js';
 import PositionFilter from './PositionFilter.js';
 import { PositionState, CloseTrigger, CloseCause, TradeAmountMode, TradeAmountSettings, NormalizedMarket, NormalizedOutcome } from '../types.js';
 import FeatureSwitches from '../config/switches.js';
+import { toTick, fromTick, clampTick, TICK_SCALE, MAX_TICK } from '../utils/ticks.js';
 
 class TradingEngine {
     private static instance: TradingEngine;
@@ -637,25 +638,29 @@ class TradingEngine {
         const sourcePrice = parseFloat(raw.price || '0.5');
         const sourceSize = parseFloat(raw.size || '0');
 
-        // ===== 4. CALCULATE REALISTIC EXECUTION PRICE =====
-        let executionPrice = sourcePrice;
+        // ===== 4. CALCULATE REALISTIC EXECUTION TICK =====
+        // Convert prices to ticks immediately
+        let executionTick = toTick(sourcePrice);
+        const sourceTick = toTick(sourcePrice);
 
         if (marketPrice) {
             // In multi-outcome, we always trade the specific outcome book.
             // Buying an outcome = Best Ask of that outcome's book.
             // Selling an outcome = Best Bid of that outcome's book.
             if (isBuy) {
-                executionPrice = marketPrice.bestAsk;
-                if (config.DEBUG_LOGS) console.log(`[EXECUTION-REALISM] Buying ${outcomeLabel} at Best Ask: $${executionPrice.toFixed(4)} (source: $${sourcePrice.toFixed(4)})`);
+                // executionPrice = marketPrice.bestAsk;
+                executionTick = toTick(marketPrice.bestAsk);
+                if (config.DEBUG_LOGS) console.log(`[EXECUTION-REALISM] Buying ${outcomeLabel} at Best Ask: ${executionTick} (source: ${sourceTick})`);
             } else {
-                executionPrice = marketPrice.bestBid;
-                if (config.DEBUG_LOGS) console.log(`[EXECUTION-REALISM] Selling ${outcomeLabel} at Best Bid: $${executionPrice.toFixed(4)} (source: $${sourcePrice.toFixed(4)})`);
+                // executionPrice = marketPrice.bestBid;
+                executionTick = toTick(marketPrice.bestBid);
+                if (config.DEBUG_LOGS) console.log(`[EXECUTION-REALISM] Selling ${outcomeLabel} at Best Bid: ${executionTick} (source: ${sourceTick})`);
             }
         }
 
-        // ===== 5. $1.00 PRICE GUARD (WAIT & RETRY) =====
-        if (executionPrice >= 1.0) {
-            console.log(`[PRICE-GUARD] ⚠️ Execution price is $1.00 for ${outcomeLabel}. Waiting 30s...`);
+        // ===== 5. 1000 TICK PRICE GUARD (WAIT & RETRY) =====
+        if (executionTick >= MAX_TICK) {
+            console.log(`[PRICE-GUARD] ⚠️ Execution tick is ${executionTick} (MAX) for ${outcomeLabel}. Waiting 30s...`);
             await new Promise(resolve => setTimeout(resolve, 30000));
 
             // Re-fetch Order Book
@@ -667,21 +672,22 @@ class TradingEngine {
                     const midPrice = (bestBid + bestAsk) / 2;
                     marketPrice = { bestBid, bestAsk, midPrice };
 
-                    executionPrice = isBuy ? bestAsk : bestBid;
+                    executionTick = isBuy ? toTick(bestAsk) : toTick(bestBid);
                 }
             } catch (e) {
                 console.warn(`[PRICE-GUARD] Failed to refresh price. Keeping original price.`);
             }
 
-            if (executionPrice >= 1.0) {
-                console.log(`[PRICE-GUARD] ⛔ Price still $1.00 after 30s. Skipping trade.`);
+            if (executionTick >= MAX_TICK) {
+                console.log(`[PRICE-GUARD] ⛔ Tick still ${executionTick} after 30s. Skipping trade.`);
                 return;
             }
-            console.log(`[PRICE-GUARD] ✅ Price dropped to ${executionPrice.toFixed(4)}. Proceeding.`);
+            console.log(`[PRICE-GUARD] ✅ Tick dropped to ${executionTick}. Proceeding.`);
         }
 
         // NEW: Fixed Share Multiplier Logic
         let myShares = 0;
+        const executionPrice = fromTick(executionTick); // Cached decimal for share calc / logging
 
         if (this.tradeSettings.mode === TradeAmountMode.FIXED) {
             // Fixed Amount Mode: Calculate shares based on execution price
@@ -712,20 +718,25 @@ class TradingEngine {
 
         const sharesSigned = isBuy ? myShares : -myShares;
 
-        // ===== PROFITABILITY CHECK FOR SELLS =====
+        // ===== PROFITABILITY CHECK FOR SELLS (TICKS) =====
         if (!isBuy) {
             const posKey = `${marketId}-${side}`;
             const currentPos = this.ledger.getPositions()[posKey];
             if (currentPos && currentPos.size > 0) {
-                const costBasis = currentPos.investedUsd / currentPos.size;
-                const netProceeds = executionPrice;
-                const lossPercent = (costBasis - netProceeds) / costBasis;
+                // Use stored entryTick if available, else derive from entryPrice
+                const entryTick = currentPos.entryTick ?? toTick(currentPos.entryPrice);
+                // Profit/Loss in ticks = (Execution - Entry) since we are selling
+                // Actually: Gross PnL = (Exit - Entry)
+                // Loss Percent = (Entry - Exit) / Entry
+
+                const tickDiff = entryTick - executionTick;
+                const lossPercent = tickDiff / entryTick;
 
                 // Only skip if loss is significantly high (allow some loss to match source profile)
                 if (config.ENABLE_TRADE_FILTERS && lossPercent > 0.10) {
                     if (config.DEBUG_LOGS) console.warn(
                         `[SKIP-PROFITABILITY] SKIPPING SELL - Loss ${(lossPercent * 100).toFixed(2)}% exceeds 10% limit. ` +
-                        `Cost Basis: $${costBasis.toFixed(4)}, Net Proceeds: $${netProceeds.toFixed(4)}`
+                        `Entry Tick: ${entryTick}, Exit Tick: ${executionTick}`
                     );
                     return;
                 }
@@ -768,7 +779,7 @@ class TradingEngine {
                             side,
                             outcomeLabel,
                             sharesSigned,
-                            executionPrice,
+                            executionPrice, // Converted via fromTick() earlier
                             txHash,
                             'COPY_TRADE', // Entry Reason
                             sourcePrice,
@@ -795,7 +806,7 @@ class TradingEngine {
                     side,
                     CloseTrigger.COPY_TRADER_EVENT,
                     CloseCause.TARGET_SELLOFF, // Explicit reason requested by user
-                    executionPrice, // Use calculated execution price
+                    executionPrice, // Converted via fromTick() earlier
                     tokenId,
                     outcomeLabel
                 );

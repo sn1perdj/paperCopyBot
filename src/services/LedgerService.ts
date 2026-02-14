@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { LedgerSchema, Position, ClosedPosition, TradeEvent, PositionState, CloseTrigger, CloseCause, NormalizedMarket } from '../types.js';
+import { toTick, TICK_SCALE } from '../utils/ticks.js';
 
 class LedgerService {
   private static instance: LedgerService;
@@ -114,6 +115,14 @@ class LedgerService {
           continue; // Different token in same market
         }
 
+
+        // UPDATE TICK
+        try {
+          if (pos.currentPrice !== undefined) {
+            pos.currentTick = toTick(pos.currentPrice);
+          }
+        } catch (e) { }
+
         pos.currentValue = pos.currentPrice * pos.size;
         pos.unrealizedPnL = pos.currentValue - pos.investedUsd;
       }
@@ -139,6 +148,15 @@ class LedgerService {
     if (txHash && this.state.processedTxHashes.includes(txHash)) return false;
 
     const finalName = marketName || `Market ${marketId.substring(0, 6)}...`;
+
+    // Normalize tick price from input price
+    let tickPrice = 0;
+    try {
+      tickPrice = toTick(price);
+    } catch (error) {
+      console.error(`[LEDGER] Invalid price for tick conversion: ${price}`);
+      tickPrice = Math.floor(price * TICK_SCALE); // Fallback
+    }
     // ... (rest of logic) ...
     // (I need to be careful with replace_file_content regular expressions/context. 
     // It might be safer to do 2 separate edits or one big one if I have the context.)
@@ -193,6 +211,9 @@ class LedgerService {
         const newCost = sizeShares * price;
 
         existing.entryPrice = (oldCost + newCost) / (oldShares + sizeShares);
+        // Update average entry tick
+        existing.entryTick = toTick(existing.entryPrice);
+
         existing.size += sizeShares;
         existing.investedUsd = oldCost + newCost;
         existing.marketName = finalName;
@@ -207,6 +228,7 @@ class LedgerService {
           tokenId,
           size: sizeShares,
           entryPrice: price,
+          entryTick: tickPrice, // STORE TICK
           investedUsd: costUsd,
           realizedPnL: 0,
           state: PositionState.OPEN
@@ -280,7 +302,9 @@ class LedgerService {
           tokenId: existing.tokenId || tokenId,
           size: sellShares,
           entryPrice: existing.entryPrice,
+          entryTick: existing.entryTick, // PRESERVE ENTRY TICK
           exitPrice: price,
+          exitTick: tickPrice, // STORE EXIT TICK
           investedUsd: costBasisOfSold,
           returnUsd: proceeds,
           realizedPnL: existing.realizedPnL,

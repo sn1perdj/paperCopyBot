@@ -2,6 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 import { WebSocket } from 'ws';
 import { OrderBook, OrderBookLevel, MarketPrice } from '../types.js';
 import { config } from '../config/config.js';
+import { fromTick, toTick, MAX_TICK, MIN_TICK } from '../utils/ticks.js';
 
 const CLOB_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
@@ -332,10 +333,28 @@ export class PolymarketService {
     }
   }
 
+  /**
+   * Validates that a tick is within the allowable range [1, 999].
+   * Throws strict error if invalid.
+   */
+  public validateOrderTick(tick: number): void {
+    if (!Number.isInteger(tick)) {
+      throw new Error(`Invalid tick: ${tick} (Must be integer)`);
+    }
+    if (tick < MIN_TICK || tick > MAX_TICK) {
+      throw new Error(`Invalid tick value: ${tick} (Must be ${MIN_TICK}-${MAX_TICK})`);
+    }
+  }
 
+  /**
+   * Formats a tick into the decimal price format expected by the API.
+   * STRICT: Converts tick -> decimal once.
+   */
+  public formatOrderPrice(tick: number): number {
+    this.validateOrderTick(tick);
+    return fromTick(tick);
+  }
 
 }
-
-
 
 export default PolymarketService;

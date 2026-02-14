@@ -1,4 +1,5 @@
 import { OrderBook, MarketPrice } from '../types.js';
+import { toTick, fromTick, clampTick, TICK_SCALE } from '../utils/ticks.js';
 
 export interface SlippageEstimate {
   spreadPct: number;
@@ -29,7 +30,37 @@ export class SlippageCalculator {
   }
 
   /**
+   * Calculate adjusted tick based on slippage tolerance.
+   * STRICT INTEGER MATH COMPLIANCE.
+   * 
+   * @param sourcePrice - The source decimal price
+   * @param slippage - Slippage tolerance (e.g. 0.01 for 1%)
+   * @param isBuy - Direction
+   */
+  public calculateSlippageTick(sourcePrice: number, slippage: number, isBuy: boolean): number {
+    const baseTick = toTick(sourcePrice);
+    // Math.floor used for integer arithmetic as per requirement
+    const slippageTicks = Math.floor(baseTick * slippage);
+
+    if (isBuy) {
+      // For BUY: Adjusted = Base - Slippage (Lower price is better, but this logic seems to imply "Max Pay"? 
+      // WAIT. 
+      // User Example for BUY: "clampTick(baseTick - slippageTicks)"
+      // User Example for SELL: "clampTick(baseTick + slippageTicks)"
+      // Usually for BUY, you accept a HIGHER price (Worst Case). 
+      // But if "sourcePrice" is the price we WANT, maybe "slippage" here means "Limit Price"?
+      // Use EXACTLY what user provided in Phase 3.
+
+      return clampTick(baseTick - slippageTicks);
+    } else {
+      // For SELL
+      return clampTick(baseTick + slippageTicks);
+    }
+  }
+
+  /**
    * Calculate expected slippage based on market conditions and trade parameters.
+   * Internally converts to ticks for calculation.
    *
    * @param marketPrice - Current market price (bestBid, bestAsk, midPrice)
    * @param orderBook - Full order book with bids and asks arrays
@@ -45,7 +76,19 @@ export class SlippageCalculator {
     isBuy: boolean,
     expectedEdge: number
   ): SlippageEstimate {
-    const { bestBid, bestAsk, midPrice } = marketPrice;
+    // CONVERT TO TICKS
+    const bestBidTick = toTick(marketPrice.bestBid);
+    const bestAskTick = toTick(marketPrice.bestAsk);
+    // midPrice might not be a perfect tick (avg of two ticks), but we treat it as float for ratio calc or use strict tick avg
+    // Floating point division is acceptable for "ratios" (spreadPct) but inputs must be ticks.
+    // Let's us midTick * TICK_SCALE for consistency? 
+    // User said: "NEVER float-based rounding in execution path"
+    // But Spread % is inherently a ratio.
+
+    // Cleanest: Use (AskTick - BidTick) / MidPrice(from Ticks)
+
+    const midPriceTick = (bestBidTick + bestAskTick) / 2;
+    const midPriceDecimal = midPriceTick / TICK_SCALE;
 
     // ===== VALIDATION & EDGE CASES =====
     if (!orderBook || !orderBook.bids || !orderBook.asks) {
@@ -72,7 +115,7 @@ export class SlippageCalculator {
       };
     }
 
-    if (midPrice <= 0) {
+    if (midPriceTick <= 0) {
       return {
         spreadPct: Infinity,
         impactPct: Infinity,
@@ -84,7 +127,7 @@ export class SlippageCalculator {
       };
     }
 
-    if (bestAsk <= 0 || bestBid <= 0) {
+    if (bestAskTick <= 0 || bestBidTick <= 0) {
       return {
         spreadPct: Infinity,
         impactPct: Infinity,
@@ -97,10 +140,12 @@ export class SlippageCalculator {
     }
 
     // ===== A. MARKET SPREAD PERCENTAGE =====
-    const spreadPct = (bestAsk - bestBid) / midPrice;
+    // Using Ticks: (AskTick - BidTick) / MidTick
+    const spreadPct = (bestAskTick - bestBidTick) / midPriceTick;
 
     // ===== B. DEPTH-BASED IMPACT =====
-    const d1Percent = this.calculateD1Percent(orderBook, bestBid, bestAsk, midPrice, isBuy);
+    // Check liquidity within 1% (approx 10 ticks based on 1000 scale)
+    const d1Percent = this.calculateD1Percent(orderBook, bestBidTick, bestAskTick, isBuy);
 
     let impactPct: number;
     if (d1Percent === 0) {
@@ -162,34 +207,45 @@ export class SlippageCalculator {
    *
    * For BUY orders: Sum all asks where price <= bestAsk * 1.01
    * For SELL orders: Sum all bids where price >= bestBid * 0.99
-   *
+   * 
    * @private
    */
   private calculateD1Percent(
     orderBook: OrderBook,
-    bestBid: number,
-    bestAsk: number,
-    midPrice: number,
+    bestBidTick: number,
+    bestAskTick: number,
     isBuy: boolean
   ): number {
     let totalLiquidity = 0;
 
+    // 1% in ticks approx? 
+    // Actually, stick to the float ratio for the threshold since "1%" is a ratio.
+    // But compare TICK PRICES.
+
     if (isBuy) {
       // BUY: Calculate USDC from asks within 1% above bestAsk
-      const askThreshold = bestAsk * 1.01;
+      // bestAskTick * 1.01
+      const askThresholdTick = Math.floor(bestAskTick * 1.01);
+
       for (const level of orderBook.asks) {
-        if (level.price <= askThreshold) {
+        const levelTick = toTick(level.price);
+        if (levelTick <= askThresholdTick) {
           // USDC = price * size
-          totalLiquidity += level.price * level.size;
+          // Use tick-derived price for safe math? Or original level.price?
+          // To be pure tick: levelTick/1000 * size. 
+          // But 'size' is float (shares). 'price' is float.
+          // Let's use the tick price for consistency.
+          totalLiquidity += (levelTick / TICK_SCALE) * level.size;
         }
       }
     } else {
       // SELL: Calculate USDC from bids within 1% below bestBid
-      const bidThreshold = bestBid * 0.99;
+      const bidThresholdTick = Math.floor(bestBidTick * 0.99);
+
       for (const level of orderBook.bids) {
-        if (level.price >= bidThreshold) {
-          // USDC = price * size
-          totalLiquidity += level.price * level.size;
+        const levelTick = toTick(level.price);
+        if (levelTick >= bidThresholdTick) {
+          totalLiquidity += (levelTick / TICK_SCALE) * level.size;
         }
       }
     }

@@ -88,12 +88,14 @@ export interface Position {
   marketSlug: string;
   side: 'YES' | 'NO';
   outcomeLabel: string;
-  tokenId?: string; // NEW: Unique identifier for the outcome token
+  tokenId?: string; // Unique identifier for the outcome token
   size: number;
   entryPrice: number;
+  entryTick?: number; // NEW: Tick at entry
   investedUsd: number;
   realizedPnL: number;
   currentPrice?: number;
+  currentTick?: number; // NEW: Current market tick
   currentValue?: number;
   unrealizedPnL?: number;
 
@@ -111,9 +113,11 @@ export interface ClosedPosition {
   marketSlug: string;
   side: 'YES' | 'NO';
   outcomeLabel: string;
-  tokenId?: string; // NEW
+  tokenId?: string;
   entryPrice: number;
+  entryTick?: number; // NEW: Tick at entry
   exitPrice: number;
+  exitTick?: number;  // NEW: Tick at exit
   size: number;
   investedUsd: number;
   returnUsd: number;

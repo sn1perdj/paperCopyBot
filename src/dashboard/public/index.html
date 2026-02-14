@@ -593,8 +593,8 @@
                         ${p.outcomeLabel || p.side}
                     </td>
                     <td>${fmt(p.size)}</td>
-                    <td>${fmtPrice(p.entryPrice)}</td>
-                    <td>${fmtPrice(p.currentPrice)}</td>
+                    <td>${fmtPrice(p.entryPrice, p.entryTick)}</td>
+                    <td>${fmtPrice(p.currentPrice, p.currentTick)}</td>
                     <td>${fmt(p.investedUsd, true)}</td>
                     <td>${fmt(p.currentValue, true)}</td>
                     <td>${fmtPnL(p.unrealizedPnL)}</td>
@@ -623,8 +623,8 @@
                         ${p.outcomeLabel || p.side}
                     </td>
                     <td>${fmt(p.size)}</td>
-                    <td>${fmtPrice(p.entryPrice)}</td>
-                    <td>${fmtPrice(p.currentPrice)}</td>
+                    <td>${fmtPrice(p.entryPrice, p.entryTick)}</td>
+                    <td>${fmtPrice(p.currentPrice, p.currentTick)}</td>
                     <td>${fmt(p.investedUsd, true)}</td>
                     <td>${fmt(p.currentValue, true)}</td>
                     <td>${fmtPnL(p.unrealizedPnL)}</td>
@@ -662,8 +662,8 @@
                     </td>
                     <td>${p.realizedPnL >= 0 ? 'WIN' : 'LOSS'}</td>
                     <td style="font-size:11px; color:#aaa;">${displayReason}</td>
-                    <td>${fmtPrice(p.entryPrice)}</td>
-                    <td>${fmtPrice(p.exitPrice)}</td>
+                    <td>${fmtPrice(p.entryPrice, p.entryTick)}</td>
+                    <td>${fmtPrice(p.exitPrice, p.exitTick)}</td>
                     <td>${fmt(p.investedUsd, true)}</td>
                     <td>${fmt(p.returnUsd, true)}</td>
                     <td>${fmtPnL(p.realizedPnL)}</td>
@@ -729,9 +729,16 @@
             if (num === undefined || num === null || isNaN(num)) return isCurr ? '$0.00' : '0.00';
             return isCurr ? '$' + num.toFixed(2) : num.toFixed(2);
         }
-        function fmtPrice(num) {
-            if (num === undefined || num === null || isNaN(num)) return '$0.00';
-            return '$' + num.toFixed(2);
+        function fmtPrice(num, tick) {
+            let cents;
+            if (tick !== undefined && tick !== null) {
+                cents = tick / 10;
+            } else {
+                if (num === undefined || num === null || isNaN(num)) return '0¢';
+                cents = num * 100;
+            }
+            // Format: 99¢, 99.9¢, 0.5¢ (Max 1 decimal for ticks)
+            return parseFloat(cents.toFixed(1)) + '¢';
         }
         function fmtPnL(num) { if (num === undefined || num === null || isNaN(num)) num = 0; const sign = num >= 0 ? '+' : '-'; const color = num >= 0 ? 'pos' : 'neg'; return `<span class="${color}">${sign}$${Math.abs(num).toFixed(2)}</span>`; }
 
