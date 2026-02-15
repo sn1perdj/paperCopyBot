@@ -148,7 +148,8 @@ class LedgerService {
     actionReason: string,
     sourcePrice?: number,
     latencyMs?: number,
-    tokenId?: string // NEW
+    tokenId?: string, // NEW
+    marketType?: "SINGLE" | "MULTI" // NEW: Step 1 Requirement
   ): boolean {
 
     if (txHash && this.state.processedTxHashes.includes(txHash)) return false;
@@ -249,7 +250,8 @@ class LedgerService {
           entryTick: tickPrice, // STORE TICK
           investedUsd: costUsd,
           realizedPnL: 0,
-          state: PositionState.OPEN
+          state: PositionState.OPEN,
+          marketType: marketType // STORE MARKET TYPE
         };
       }
     } else {
@@ -373,6 +375,17 @@ class LedgerService {
 
     markAsProcessed();
     return true;
+  }
+
+  /**
+   * Updates the state of a position (e.g. ACTIVE -> PENDING_RESOLUTION)
+   * Persists changes to ledger.json
+   */
+  public updatePositionState(posKey: string, newState: PositionState): void {
+    if (this.state.positions[posKey]) {
+      this.state.positions[posKey].state = newState;
+      this.save();
+    }
   }
 }
 

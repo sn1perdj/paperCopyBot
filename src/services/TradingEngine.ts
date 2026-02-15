@@ -4,7 +4,7 @@ import config from '../config/config.js';
 import LedgerService from '../services/LedgerService.js';
 import PolymarketService from './PolymarketService.js';
 import SlippageCalculator from './SlippageCalculator.js';
-import MarketResolver from './MarketResolver.js';
+import { MarketLifecycle, MarketLifecycleResult } from './MarketLifecycle.js'; // NEW
 import RetryHelper from './RetryHelper.js';
 import PositionFilter from './PositionFilter.js';
 import { PositionState, CloseTrigger, CloseCause, TradeAmountMode, TradeAmountSettings, NormalizedMarket, NormalizedOutcome } from '../types.js';
@@ -16,7 +16,7 @@ class TradingEngine {
     private ledger: LedgerService;
     private api: PolymarketService;
     private slippageCalculator: SlippageCalculator;
-    private marketResolver: MarketResolver;
+    // private marketResolver: MarketResolver; // REMOVED
     private retryHelper: RetryHelper;
     private positionFilter: PositionFilter;
     private isPolling = false;
@@ -32,7 +32,7 @@ class TradingEngine {
         this.ledger = LedgerService.getInstance();
         this.api = PolymarketService.getInstance();
         this.slippageCalculator = new SlippageCalculator(config.SLIPPAGE_DELAY_PENALTY);
-        this.marketResolver = new MarketResolver();
+        // this.marketResolver = new MarketResolver(); // DEPRECATED
         this.retryHelper = new RetryHelper({ maxAttempts: 3, baseDelayMs: 300 });
         this.positionFilter = new PositionFilter();
 
@@ -179,7 +179,12 @@ class TradingEngine {
         }
 
         // 2. STATE CHECK
-        if (pos.state !== PositionState.OPEN) {
+        // Allow close if OPEN, or if PENDING_RESOLUTION and it's a RESOLUTION trigger
+        const isAllowedState =
+            pos.state === PositionState.OPEN ||
+            (pos.state === PositionState.PENDING_RESOLUTION && trigger === CloseTrigger.MARKET_RESOLUTION);
+
+        if (!isAllowedState) {
             console.log(`[CLOSE-IGNORE] ${posKey} is ${pos.state}. Ignoring ${trigger}/${cause}`);
             return;
         }
@@ -249,7 +254,8 @@ class TradingEngine {
                 reasonStr,
                 0, // sourcePrice - N/A for close
                 0, // latencyMs - N/A for close
-                pos.tokenId // NEW: REQUIRED for position lookup
+                pos.tokenId, // NEW: REQUIRED for position lookup
+                pos.marketType // PASS MARKET TYPE
             );
 
             if (!updateOk) {
@@ -341,11 +347,8 @@ class TradingEngine {
                 }
 
                 if (tickCount % 10 === 0) {
-                    await this.runWatchdog();
+                    await this.manageLifecycle();
                 }
-
-                // CHECK EXPIRATIONS (Immediate Liquidation Trigger)
-                await this.checkExpirations();
 
                 // CHECK LIQUIDITY (Guard)
                 if (tickCount % 5 === 0) { // Check every 5 ticks (~5-10s)
@@ -393,132 +396,75 @@ class TradingEngine {
         console.log('\n[ENGINE] Polling loop stopped.');
     }
 
-    // --- WATCHDOG (Resolution Monitoring) ---
-    private async runWatchdog() {
+    // --- LIFECYCLE MANAGEMENT (NEW) ---
+    private async manageLifecycle() {
         const positions = this.ledger.getPositions();
         if (Object.keys(positions).length === 0) return;
 
-        // Iterate positions individually to handle partial resolutions (e.g. Multi-Outcome)
         for (const pos of Object.values(positions)) {
             try {
-                const meta = await this.api.getMarketDetails(pos.marketId);
-                if (!meta) continue;
+                // 1. Fetch Fresh Container Context (Event/Market)
+                const container = await this.api.getMarketDetails(pos.marketId);
+                if (!container) continue;
 
-                // 1. Identify Outcome Index if missing
-                let outcomeIndex = -1;
-                if (meta.clobTokenIds && pos.tokenId) {
-                    outcomeIndex = meta.clobTokenIds.indexOf(pos.tokenId);
+                // 2. Get Deterministic State via MarketLifecycle Service
+                const lifecycle: MarketLifecycleResult = MarketLifecycle.getMarketLifecycle(container, pos.marketId);
+
+                // 3. Apply State Transitions
+                if (lifecycle.state === "PENDING_RESOLUTION") {
+                    if (pos.state !== PositionState.PENDING_RESOLUTION && pos.state !== PositionState.CLOSED) {
+                        console.log(`[LIFECYCLE] Moving ${pos.marketName} to PENDING_RESOLUTION`);
+                        this.ledger.updatePositionState(pos.positionId || pos.marketId, PositionState.PENDING_RESOLUTION);
+                    }
                 }
+                else if (lifecycle.state === "CLOSED") {
+                    // RESOLVED WITH RESULT
+                    const result = lifecycle.result; // "YES_WON" | "NO_WON"
+                    const winningLabel = lifecycle.winningOutcomeLabel;
 
-                // 2. Check Resolution (Global OR Partial)
-                const isGlobalResolved = meta.resolved;
-                const isPartialResolved = meta.outcomeStatuses && outcomeIndex !== -1 && meta.outcomeStatuses[outcomeIndex] === 'resolved';
+                    if (result || winningLabel) {
+                        let isWinner = false;
 
-                if (isGlobalResolved || isPartialResolved) {
-                    // Determine Winner
-                    // For active multi-outcome markets, if one token is resolved, check if it's the winner
-                    // If meta.winnerTokenId exists, use it. 
-                    // Otherwise, falling back to price or assuming 0 if 'resolved' but not 'winner' might be risky?
-                    // User logic: "const isWinner = meta.winnerTokenId === pos.tokenId;"
+                        if (winningLabel && pos.outcomeLabel) {
+                            // ROBUST: Check if our position's outcome label matches the winner
+                            isWinner = winningLabel.toUpperCase() === pos.outcomeLabel.toUpperCase();
+                        } else if (result) {
+                            // FALLBACK: Binary/Legacy logic
+                            isWinner =
+                                (result === "YES_WON" && pos.side === "YES") ||
+                                (result === "NO_WON" && pos.side === "NO");
+                        }
 
-                    let isWinner = false;
-
-                    if (meta.winnerTokenId && pos.tokenId) {
-                        isWinner = meta.winnerTokenId === pos.tokenId;
-                    } else if (meta.winner) {
-                        // Binary / old model
-                        const w = String(meta.winner).toUpperCase();
-                        if (w === 'YES' && pos.side === 'YES') isWinner = true;
-                        if (w === 'NO' && pos.side === 'NO') isWinner = true;
-                        if (pos.outcomeLabel && w === pos.outcomeLabel.toUpperCase()) isWinner = true;
-                    } else if (meta.outcomePrices) {
-                        // FALLBACK: Check outcomePrices (e.g. ["0", "1"])
-                        // 1 = Winner, 0 = Loser
-                        try {
-                            const prices = typeof meta.outcomePrices === 'string' ? JSON.parse(meta.outcomePrices) : meta.outcomePrices;
-                            if (Array.isArray(prices) && prices.length > 0) {
-                                // Find index of winner (price >= 0.99 or max price if definitive)
-                                const winnerIndex = prices.findIndex((p: any) => Number(p) >= 0.99); // Threshold for winner
-
-                                if (winnerIndex !== -1) {
-                                    // Check if this position matches the winner index
-                                    // A) Match by Token ID if available
-                                    if (meta.clobTokenIds && meta.clobTokenIds[winnerIndex] && pos.tokenId) {
-                                        if (meta.clobTokenIds[winnerIndex] === pos.tokenId) {
-                                            isWinner = true;
-                                        }
-                                    }
-                                    // B) Match by Outcome Label/Index (Legacy/Binary)
-                                    else if (meta.outcomes) {
-                                        const outcomes = typeof meta.outcomes === 'string' ? JSON.parse(meta.outcomes) : meta.outcomes;
-                                        // For binary: Index 0 = NO/Down, Index 1 = YES/Up
-                                        // If position is YES on Up (Index 1) and Winner is Index 1 -> WIN
-
-                                        // If we have tokenId, we are safer. If not, rely on side/label.
-                                        // If side 'YES' on outcome 'Up', and 'Up' is at winnerIndex, we win.
-                                        if (pos.outcomeLabel && outcomes[winnerIndex] === pos.outcomeLabel) {
-                                            isWinner = true;
-                                        }
-                                        // Fallback for Binary "YES" position on Index 1 (YES)
-                                        else if (meta.outcomes && meta.outcomes.length === 2 && winnerIndex === 1 && pos.side === 'YES' && (pos.outcomeLabel === 'YES' || pos.outcomeLabel === 'Up')) {
-                                            isWinner = true;
-                                        }
-                                        // Fallback for Binary "YES" position on Index 0 (NO) -> Likely loss for YES side if we bought "YES", 
-                                        // OLD LOGIC WAS CONFUSING. Let's stick to explicit match if possible.
-                                    }
-                                }
-                            }
-                        } catch (e) {
-                            console.warn(`[WATCHDOG] Failed to parse outcomePrices for ${pos.marketId}`, e);
+                        // Check if already closed/settled to avoid spam
+                        if (pos.state !== PositionState.CLOSED && pos.state !== PositionState.SETTLED) {
+                            console.log(`[LIFECYCLE] Resolving ${pos.marketName}. WinnerLabel: ${winningLabel}, MyLabel: ${pos.outcomeLabel}. Result: ${isWinner ? 'WIN' : 'LOSS'}`);
+                            await this.settlePosition(
+                                pos.marketId,
+                                pos.side,
+                                `MARKET_RESOLUTION|${isWinner ? 'WINNER' : 'LOSER'}`,
+                                undefined,
+                                pos.tokenId,
+                                pos.outcomeLabel,
+                                isWinner
+                            );
                         }
                     }
-
-                    if (config.DEBUG_LOGS) console.log(
-                        `\n[WATCHDOG] Position ${pos.marketName} (${pos.outcomeLabel}) resolved. Winner: ${isWinner}`
-                    );
-
-                    await this.settlePosition(
-                        pos.marketId,
-                        pos.side,
-                        `MARKET_RESOLUTION|${isWinner ? 'WINNER' : 'LOSER'}`,
-                        undefined,
-                        pos.tokenId,
-                        pos.outcomeLabel,
-                        isWinner
-                    );
+                }
+                else if (lifecycle.state === "ACTIVE") {
+                    // Ensure state is OPEN if currently PENDING (reverted?)
+                    if (pos.state === PositionState.PENDING_RESOLUTION) {
+                        console.log(`[LIFECYCLE] Reverting ${pos.marketName} to ACTIVE/OPEN`);
+                        this.ledger.updatePositionState(pos.positionId || pos.marketId, PositionState.OPEN);
+                    }
                 }
 
-            } catch (err: any) {
-                console.error(`[WATCHDOG] Error checking resolution for ${pos.marketName.substring(0, 10)}...:`, err.message);
+            } catch (e) {
+                console.error(`[LIFECYCLE] Error managing ${pos.marketName}:`, e);
             }
         }
     }
 
-    private async checkExpirations() {
-        const now = Date.now();
-        const positionsArray = Object.values(this.ledger.getPositions());
-
-        for (const pos of positionsArray) {
-            let cache = this.ledger.getMarketCache(pos.marketId);
-
-            // Fetch if missing
-            if (!cache || !cache.endTime) {
-                try {
-                    const meta = await this.api.getMarketDetails(pos.marketId);
-                    if (meta && meta.endTime) {
-                        this.ledger.updateMarketCache(pos.marketId, meta.question, meta.slug, meta.outcomes, meta.clobTokenIds, meta.endTime, meta.model);
-                        cache = this.ledger.getMarketCache(pos.marketId);
-                    }
-                } catch (e) { }
-            }
-
-            if (cache && cache.endTime && now >= cache.endTime) {
-                // FIX: Just log it. Do NOT call tryClosePosition here.
-                // The runWatchdog() method will handle resolution when it's official.
-                if (config.DEBUG_LOGS) console.log(`[WATCHDOG] ${pos.marketName} trading ended. Waiting for target sell or oracle.`);
-            }
-        }
-    }
+    // LEGACY METHODS REMOVED: runWatchdog, checkExpirations
 
     private liquidityFailures = new Map<string, number>();
 
@@ -636,6 +582,20 @@ class TradingEngine {
             console.error(`[ENGINE] Failed to resolve market model for ${marketId}. Skipping.`);
             return;
         }
+
+        // NEW: Detect Market Type immediately
+        let marketType: "SINGLE" | "MULTI" = "SINGLE";
+        try {
+            // Use fresh meta if available, else derive/default.
+            // We can re-fetch or use what we have.
+            // Since we have 'model', we might have cached it.
+            // But we need the CONTAINER (markets array) which might not be in 'model'.
+            // Let's safe-fetch specific for this logic to be robust.
+            const container = await this.api.getMarketDetails(marketId);
+            if (container) {
+                marketType = MarketLifecycle.getMarketLifecycle(container, marketId).marketType;
+            }
+        } catch (e) { }
 
         // ===== 2. SMART OUTCOME SELECTION =====
         const rawOutcomeStr = String(raw.outcome || '').toUpperCase();
@@ -852,7 +812,8 @@ class TradingEngine {
                             'COPY_TRADE', // Entry Reason
                             sourcePrice,
                             Math.max(0, Date.now() - fetchTime),
-                            tokenId // NEW
+                            tokenId, // NEW
+                            marketType // Pass Detected Type
                         );
                     },
                     `BUY ${myShares.toFixed(1)} shares on ${marketName.substring(0, 20)}...`

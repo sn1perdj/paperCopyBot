@@ -129,7 +129,9 @@ export class MarketResolver {
         if (winIdx !== -1) {
           return { label: null, index: winIdx, side: null, resolvedTokenIds: resolvedTokens };
         }
-      } catch (e) { }
+      } catch (e) {
+        console.error("[RESOLVER] Failed parsing outcomePrices", e);
+      }
     }
     return { label: null, index: null, side: null, resolvedTokenIds: resolvedTokens };
   }

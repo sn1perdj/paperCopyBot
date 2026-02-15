@@ -70,6 +70,37 @@ export class PolymarketService {
 
       if (!data) return null;
 
+      // === FETCH PARENT EVENT FOR CONTAINER CONTEXT ===
+      // User Logic: "if (container.markets.length === 1) marketType = 'SINGLE' else 'MULTI'"
+      // We need the 'markets' array from the parent Event.
+      let containerMarkets: any[] = [];
+      let eventId = '';
+
+      if (data.events && Array.isArray(data.events) && data.events.length > 0) {
+        eventId = data.events[0].id;
+      } else if (data.eventId) {
+        eventId = data.eventId;
+      }
+
+      if (eventId) {
+        try {
+          // OPTIMIZATION: In a real HFT, we might cache this.
+          // For now, we fetch it to ensure correctness as requested.
+          const eventRes = await this.gammaApiClient.get(`/events/${eventId}`);
+          if (eventRes.data && Array.isArray(eventRes.data.markets)) {
+            containerMarkets = eventRes.data.markets;
+          }
+        } catch (e) {
+          console.warn(`[POLY-API] Failed to fetch parent event ${eventId} for market ${marketId}`);
+          // Fallback: If we can't get event, assume Single if current market is standalone?
+          // Or just push current market as the only one.
+          if (containerMarkets.length === 0) containerMarkets.push(data);
+        }
+      } else {
+        // No parent event found? Treat as single.
+        containerMarkets.push(data);
+      }
+
       let eventSlug = data.slug;
       if (data.events && Array.isArray(data.events) && data.events.length > 0) {
         eventSlug = data.events[0].slug;
@@ -159,6 +190,9 @@ export class PolymarketService {
         outcomes: outcomes,
         clobTokenIds,
         endTime: data.endDate ? new Date(data.endDate).getTime() : undefined,
+        acceptingOrders: data.acceptingOrders, // NEW: Required for Lifecycle
+        umaResolutionStatus: data.umaResolutionStatus, // NEW: Required for Lifecycle
+        markets: containerMarkets, // NEW: The Container Context
 
         // NEW: Normalized Model
         model: marketModel

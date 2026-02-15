@@ -55,6 +55,7 @@ export interface MarketPrice {
 export enum PositionState {
   OPEN = 'OPEN',
   CLOSING = 'CLOSING', // Transient state during execution
+  PENDING_RESOLUTION = 'PENDING_RESOLUTION', // Waiting for resolution
   CLOSED = 'CLOSED',
   SETTLED = 'SETTLED',
   INVALIDATED = 'INVALIDATED'
@@ -101,6 +102,7 @@ export interface Position {
 
   // LIFECYCLE STATE
   state: PositionState;
+  marketType?: "SINGLE" | "MULTI"; // NEW: Step 1 Requirement
   closeTrigger?: CloseTrigger;
   closeCause?: CloseCause;
   closePriority?: number;

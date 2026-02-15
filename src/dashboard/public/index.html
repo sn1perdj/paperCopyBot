@@ -569,8 +569,9 @@
                 const pending = [];
 
                 // Filter Logic
+                // Filter Logic (Updated to use deterministic State)
                 data.activePositions.forEach(p => {
-                    if (p.endTime && p.endTime < now) {
+                    if (p.state === 'PENDING_RESOLUTION') {
                         pending.push(p);
                     } else {
                         active.push(p);
