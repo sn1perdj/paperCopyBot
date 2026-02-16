@@ -20,50 +20,72 @@ export class MarketLifecycle {
         // Default to SINGLE if no markets array or length <= 1
         const marketType: "SINGLE" | "MULTI" = (markets.length > 1) ? "MULTI" : "SINGLE";
 
-        // Helper to determine winner from market data
-        const determineWinner = (market: any): Partial<MarketLifecycleResult> => {
+        // Helper to determine winner from resolution data (shared by both)
+        const parseWinner = (market: any): { result?: "YES_WON" | "NO_WON"; winningOutcomeLabel?: string; winningOutcomeIndex?: number } => {
+            let result: "YES_WON" | "NO_WON" | undefined;
+            let winningOutcomeLabel: string | undefined;
+            let winningOutcomeIndex: number | undefined;
+
+            try {
+                const outcomes = typeof market.outcomes === 'string' ? JSON.parse(market.outcomes) : market.outcomes;
+                const prices = typeof market.outcomePrices === 'string' ? JSON.parse(market.outcomePrices) : market.outcomePrices;
+
+                if (Array.isArray(outcomes) && Array.isArray(prices)) {
+                    for (let i = 0; i < outcomes.length; i++) {
+                        // Winner has price 1 (or close to 1)
+                        if (Number(prices[i]) >= 0.99) {
+                            winningOutcomeIndex = i;
+                            winningOutcomeLabel = String(outcomes[i]);
+                            const labelUpper = winningOutcomeLabel.toUpperCase();
+
+                            // Legacy Result Mapping
+                            if (labelUpper.includes("YES") || labelUpper.includes("UP")) {
+                                result = "YES_WON";
+                            } else if (labelUpper.includes("NO") || labelUpper.includes("DOWN")) {
+                                result = "NO_WON";
+                            }
+                            break; // Found winner
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("[LIFECYCLE] Failed parsing resolution data", e);
+            }
+
+            return { result, winningOutcomeLabel, winningOutcomeIndex };
+        };
+
+        // SINGLE-OUTCOME LOGIC: Use endDate
+        const determineSingleOutcomeState = (market: any): Partial<MarketLifecycleResult> => {
             const umaStatus = market.umaResolutionStatus;
             const now = Date.now();
             const end = new Date(market.endDate).getTime();
 
             if (umaStatus === "resolved") {
-                let result: "YES_WON" | "NO_WON" | undefined;
-                let winningOutcomeLabel: string | undefined;
-                let winningOutcomeIndex: number | undefined;
-
-                try {
-                    const outcomes = typeof market.outcomes === 'string' ? JSON.parse(market.outcomes) : market.outcomes;
-                    const prices = typeof market.outcomePrices === 'string' ? JSON.parse(market.outcomePrices) : market.outcomePrices;
-
-                    if (Array.isArray(outcomes) && Array.isArray(prices)) {
-                        for (let i = 0; i < outcomes.length; i++) {
-                            // Winner has price 1 (or close to 1)
-                            if (Number(prices[i]) >= 0.99) {
-                                winningOutcomeIndex = i;
-                                winningOutcomeLabel = String(outcomes[i]);
-                                const labelUpper = winningOutcomeLabel.toUpperCase();
-
-                                // Legacy Result Mapping
-                                if (labelUpper.includes("YES") || labelUpper.includes("UP")) {
-                                    result = "YES_WON";
-                                } else if (labelUpper.includes("NO") || labelUpper.includes("DOWN")) {
-                                    result = "NO_WON";
-                                }
-                                break; // Found winner
-                            }
-                        }
-                    }
-                } catch (e) {
-                    console.error("[LIFECYCLE] Failed parsing resolution data", e);
-                }
-
                 return {
                     state: "CLOSED",
-                    result,
-                    winningOutcomeLabel,
-                    winningOutcomeIndex
+                    ...parseWinner(market)
                 };
             } else if (now >= end) {
+                return { state: "PENDING_RESOLUTION" };
+            } else {
+                return { state: "ACTIVE" };
+            }
+        };
+
+        // MULTI-OUTCOME LOGIC: Use acceptingOrders flag
+        const determineMultiOutcomeState = (market: any): Partial<MarketLifecycleResult> => {
+            const umaStatus = market.umaResolutionStatus || market.uma_resolution_status;
+            // Handle both camelCase and snake_case, and string/boolean
+            const acceptingOrders = market.acceptingOrders ?? market.accepting_orders;
+            const isAccepting = acceptingOrders === true || acceptingOrders === "true";
+
+            if (umaStatus === "resolved") {
+                return {
+                    state: "CLOSED",
+                    ...parseWinner(market)
+                };
+            } else if (!isAccepting) {
                 return { state: "PENDING_RESOLUTION" };
             } else {
                 return { state: "ACTIVE" };
@@ -73,13 +95,19 @@ export class MarketLifecycle {
         // --- EXECUTE DETERMINISTIC CHECK ---
         if (marketType === "SINGLE") {
             const market = markets.length > 0 ? markets[0] : container;
-            return { marketType, ...determineWinner(market) } as MarketLifecycleResult;
+            return { marketType, ...determineSingleOutcomeState(market) } as MarketLifecycleResult;
         }
 
         if (marketType === "MULTI") {
-            const market = markets.find((m: any) => m.id === marketId);
-            if (!market) return { marketType: "MULTI", state: "ACTIVE" };
-            return { marketType, ...determineWinner(market) } as MarketLifecycleResult;
+            // Match by condition_id (marketId is a condition_id) or id
+            const market = markets.find((m: any) =>
+                m.condition_id === marketId || m.conditionId === marketId || m.id === marketId
+            );
+            if (!market) {
+                console.warn(`[LIFECYCLE] No market found for ${marketId} in ${markets.length} event markets. IDs: ${markets.map((m: any) => m.id || m.condition_id).join(', ')}`);
+                return { marketType: "MULTI", state: "ACTIVE" };
+            }
+            return { marketType, ...determineMultiOutcomeState(market) } as MarketLifecycleResult;
         }
 
         return { marketType: "SINGLE", state: "ACTIVE" };
