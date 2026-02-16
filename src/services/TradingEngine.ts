@@ -425,8 +425,12 @@ class TradingEngine {
                     if (result || winningLabel) {
                         let isWinner = false;
 
-                        if (winningLabel && pos.outcomeLabel) {
-                            // ROBUST: Check if our position's outcome label matches the winner
+                        if (lifecycle.marketType === "MULTI" && lifecycle.winningSide) {
+                            // MULTI: Compare winningSide against position.side
+                            // Each child market is its own YES/NO — resolution is per child, not group
+                            isWinner = pos.side === lifecycle.winningSide;
+                        } else if (winningLabel && pos.outcomeLabel) {
+                            // SINGLE: Check if our position's outcome label matches the winner
                             isWinner = winningLabel.toUpperCase() === pos.outcomeLabel.toUpperCase();
                         } else if (result) {
                             // FALLBACK: Binary/Legacy logic
@@ -437,7 +441,10 @@ class TradingEngine {
 
                         // Check if already closed/settled to avoid spam
                         if (pos.state !== PositionState.CLOSED && pos.state !== PositionState.SETTLED) {
-                            console.log(`[LIFECYCLE] Resolving ${pos.marketName}. WinnerLabel: ${winningLabel}, MyLabel: ${pos.outcomeLabel}. Result: ${isWinner ? 'WIN' : 'LOSS'}`);
+                            const logExtra = lifecycle.marketType === "MULTI"
+                                ? `WinningSide: ${lifecycle.winningSide}, MySide: ${pos.side}`
+                                : `WinnerLabel: ${winningLabel}, MyLabel: ${pos.outcomeLabel}`;
+                            console.log(`[LIFECYCLE] Resolving ${pos.marketName} [${lifecycle.marketType}]. ${logExtra}. Result: ${isWinner ? 'WIN' : 'LOSS'}`);
                             await this.settlePosition(
                                 pos.marketId,
                                 pos.side,
@@ -521,11 +528,26 @@ class TradingEngine {
         isWinner?: boolean
     ) {
         let trigger = CloseTrigger.MARKET_RESOLUTION;
-        let cause = isWinner ? CloseCause.WINNER_YES : CloseCause.WINNER_NO;
 
-        // Backward compatibility for binary if winningSide is passed but isWinner is undefined
-        if (isWinner === undefined && winningSide) {
-            cause = (side === winningSide) ? CloseCause.WINNER_YES : CloseCause.WINNER_NO;
+        // cause must reflect which SIDE won the MARKET (not whether user won)
+        // This is critical because tryClosePosition uses cause to determine exitPrice:
+        //   (WINNER_YES && side==='YES') || (WINNER_NO && side==='NO') → 1.0 else 0.0
+        let cause: CloseCause;
+        if (isWinner !== undefined) {
+            // If user won with YES → YES won the market
+            // If user won with NO → NO won the market
+            // If user lost with YES → NO won the market
+            // If user lost with NO → YES won the market
+            if (isWinner) {
+                cause = side === 'YES' ? CloseCause.WINNER_YES : CloseCause.WINNER_NO;
+            } else {
+                cause = side === 'YES' ? CloseCause.WINNER_NO : CloseCause.WINNER_YES;
+            }
+        } else if (winningSide) {
+            // Legacy: winningSide directly tells us which side won
+            cause = winningSide === 'YES' ? CloseCause.WINNER_YES : CloseCause.WINNER_NO;
+        } else {
+            cause = CloseCause.WINNER_YES; // Fallback
         }
 
         await this.tryClosePosition(marketId, side, trigger, cause, 0, tokenId, outcomeLabel);

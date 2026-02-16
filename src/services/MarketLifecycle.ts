@@ -4,6 +4,7 @@ export interface MarketLifecycleResult {
     result?: "YES_WON" | "NO_WON";
     winningOutcomeLabel?: string;
     winningOutcomeIndex?: number;
+    winningSide?: "YES" | "NO"; // MULTI-only: the winning side within this child market
 }
 
 export class MarketLifecycle {
@@ -73,6 +74,38 @@ export class MarketLifecycle {
             }
         };
 
+        // MULTI-OUTCOME: Determine winningSide from outcomePrices per child market
+        const parseMultiWinner = (market: any): { winningSide?: "YES" | "NO"; winningOutcomeLabel?: string; winningOutcomeIndex?: number } => {
+            try {
+                const outcomes = typeof market.outcomes === 'string' ? JSON.parse(market.outcomes) : market.outcomes;
+                const prices = typeof market.outcomePrices === 'string' ? JSON.parse(market.outcomePrices) : market.outcomePrices;
+
+                if (Array.isArray(outcomes) && Array.isArray(prices)) {
+                    const winningIndex = prices.findIndex((p: any) => Number(p) >= 0.99);
+                    if (winningIndex !== -1) {
+                        const winningLabel = String(outcomes[winningIndex]).toUpperCase();
+                        let winningSide: "YES" | "NO" | undefined;
+
+                        if (winningLabel === "YES" || winningLabel.includes("YES")) {
+                            winningSide = "YES";
+                        } else if (winningLabel === "NO" || winningLabel.includes("NO")) {
+                            winningSide = "NO";
+                        }
+
+                        return {
+                            winningSide,
+                            winningOutcomeLabel: String(outcomes[winningIndex]),
+                            winningOutcomeIndex: winningIndex
+                        };
+                    }
+                }
+            } catch (e) {
+                console.error("[LIFECYCLE] Failed parsing MULTI resolution data", e);
+            }
+
+            return {};
+        };
+
         // MULTI-OUTCOME LOGIC: Use acceptingOrders flag
         const determineMultiOutcomeState = (market: any): Partial<MarketLifecycleResult> => {
             const umaStatus = market.umaResolutionStatus || market.uma_resolution_status;
@@ -81,9 +114,11 @@ export class MarketLifecycle {
             const isAccepting = acceptingOrders === true || acceptingOrders === "true";
 
             if (umaStatus === "resolved") {
+                const winner = parseMultiWinner(market);
                 return {
                     state: "CLOSED",
-                    ...parseWinner(market)
+                    result: winner.winningSide === "YES" ? "YES_WON" : winner.winningSide === "NO" ? "NO_WON" : undefined,
+                    ...winner
                 };
             } else if (!isAccepting) {
                 return { state: "PENDING_RESOLUTION" };
