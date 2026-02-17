@@ -27,26 +27,28 @@ async function gracefulShutdown() {
         const balance = ledgerService.getBalance();
         const closedPositions = ledgerService.getClosedPositions();
 
-        console.log('\n[SHUTDOWN] 📊 FINAL BOT STATE:');
-        console.log(`├─ Current Balance: $${balance.toFixed(2)}`);
-        console.log(`├─ Open Positions: ${Object.keys(positions).length}`);
-        console.log(`├─ Closed Positions (Total): ${closedPositions.length}`);
+        if (config.DEBUG_LOGS) {
+            console.log('\n[SHUTDOWN] 📊 FINAL BOT STATE:');
+            console.log(`├─ Current Balance: $${balance.toFixed(2)}`);
+            console.log(`├─ Open Positions: ${Object.keys(positions).length}`);
+            console.log(`├─ Closed Positions (Total): ${closedPositions.length}`);
 
-        if (Object.keys(positions).length > 0) {
-            console.log(`├─ Open Positions Details:`);
-            for (const pos of Object.values(positions)) {
-                const pnl = pos.unrealizedPnL || 0;
-                const pnlSign = pnl >= 0 ? '📈' : '📉';
-                const price = pos.currentPrice || 0;
-                console.log(
-                    `│  ├─ ${pos.side} ${pos.size.toFixed(2)} units in "${pos.marketName.substring(0, 30)}..." @ $${price.toFixed(4)} | P&L: ${pnlSign} $${pnl.toFixed(2)}`
-                );
+            if (Object.keys(positions).length > 0) {
+                console.log(`├─ Open Positions Details:`);
+                for (const pos of Object.values(positions)) {
+                    const pnl = pos.unrealizedPnL || 0;
+                    const pnlSign = pnl >= 0 ? '📈' : '📉';
+                    const price = pos.currentPrice || 0;
+                    console.log(
+                        `│  ├─ ${pos.side} ${pos.size.toFixed(2)} units in "${pos.marketName.substring(0, 30)}..." @ $${price.toFixed(4)} | P&L: ${pnlSign} $${pnl.toFixed(2)}`
+                    );
+                }
             }
-        }
 
-        // 3. Log fees and stats
-        const dailyPnL = ledgerService.getDailyStats().dailyRealized || 0;
-        console.log(`└─ Daily Realized P&L: $${dailyPnL.toFixed(2)}`);
+            // 3. Log fees and stats
+            const dailyPnL = ledgerService.getDailyStats().dailyRealized || 0;
+            console.log(`└─ Daily Realized P&L: $${dailyPnL.toFixed(2)}`);
+        }
 
         logService.logSystem('SHUTDOWN', 'Bot shutdown complete. Final state logged.');
         console.log('\n[SHUTDOWN] ✅ Graceful shutdown complete. Exiting...');
@@ -91,11 +93,11 @@ async function main() {
         // UPDATED: No longer needs setServices(), it connects automatically via Singletons
         const dashboard = new DashboardServer(config.PORT);
         dashboard.start(config.PORT);
-        logService.logSystem('Dashboard', `UI running at http://localhost:${config.PORT}`);
+        if (config.DEBUG_LOGS) logService.logSystem('Dashboard', `UI running at http://localhost:${config.PORT}`);
 
         // 6. Start the Copy-Trading Loop
         if (config.DEBUG_LOGS) logService.logSystem('Engine', `Tracking Profile: ${config.PROFILE_ADDRESS}`);
-        logService.logSystem('Engine', 'Starting polling loop...');
+        if (config.DEBUG_LOGS) logService.logSystem('Engine', 'Starting polling loop...');
 
         await tradingEngine.startPolling();
 

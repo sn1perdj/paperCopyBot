@@ -1,3 +1,4 @@
+import config from '../config/config.js';
 export interface MarketLifecycleResult {
     marketType: "SINGLE" | "MULTI";
     state: "ACTIVE" | "PENDING_RESOLUTION" | "CLOSED";
@@ -139,7 +140,7 @@ export class MarketLifecycle {
                 m.condition_id === marketId || m.conditionId === marketId || m.id === marketId
             );
             if (!market) {
-                console.warn(`[LIFECYCLE] No market found for ${marketId} in ${markets.length} event markets. IDs: ${markets.map((m: any) => m.id || m.condition_id).join(', ')}`);
+                if (config.DEBUG_LOGS) console.warn(`[LIFECYCLE] No market found for ${marketId} in ${markets.length} event markets. IDs: ${markets.map((m: any) => m.id || m.condition_id).join(', ')}`);
                 return { marketType: "MULTI", state: "ACTIVE" };
             }
             return { marketType, ...determineMultiOutcomeState(market) } as MarketLifecycleResult;

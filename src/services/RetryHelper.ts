@@ -80,9 +80,11 @@ export class RetryHelper {
         if (attempt === this.maxAttempts) {
           // Final attempt failed
           const totalTimeMs = Date.now() - startTime;
-          console.error(
-            `[RETRY ✗] ${operationName} failed after ${this.maxAttempts} attempts in ${totalTimeMs}ms: ${lastError.message}`
-          );
+          if (config.DEBUG_LOGS) {
+            console.error(
+              `[RETRY ✗] ${operationName} failed after ${this.maxAttempts} attempts in ${totalTimeMs}ms: ${lastError.message}`
+            );
+          }
 
           return {
             success: false,
@@ -96,9 +98,11 @@ export class RetryHelper {
         if (!isRetryable) {
           // Non-retryable error, fail immediately
           const totalTimeMs = Date.now() - startTime;
-          console.warn(
-            `[RETRY ✗] Non-retryable error in ${operationName} after ${attempt} attempt(s): ${lastError.message}`
-          );
+          if (config.DEBUG_LOGS) {
+            console.warn(
+              `[RETRY ✗] Non-retryable error in ${operationName} after ${attempt} attempt(s): ${lastError.message}`
+            );
+          }
 
           return {
             success: false,
@@ -111,9 +115,11 @@ export class RetryHelper {
 
         // Wait before retrying
         const delayMs = this.calculateDelay(attempt);
-        console.warn(
-          `[RETRY] ${operationName} attempt ${attempt} failed: ${lastError.message}. Retrying in ${delayMs}ms...`
-        );
+        if (config.DEBUG_LOGS) {
+          console.debug(
+            `[RETRY] ${operationName} attempt ${attempt} failed: ${lastError.message}. Retrying in ${delayMs}ms...`
+          );
+        }
 
         await this.sleep(delayMs);
       }

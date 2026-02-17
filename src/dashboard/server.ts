@@ -28,7 +28,7 @@ export default class DashboardServer {
         if (config.PROFILE_ADDRESS) {
             this.poly.getProfileName(config.PROFILE_ADDRESS).then(name => {
                 this.cachedProfileName = name;
-                console.log(`[DASHBOARD] Target Profile: ${name} (${config.PROFILE_ADDRESS})`);
+
             });
         }
 
@@ -130,6 +130,6 @@ export default class DashboardServer {
     }
 
     public start(port: number) {
-        this.httpServer.listen(port, () => console.log(`Dashboard on ${port}`));
+        this.httpServer.listen(port, () => { });
     }
 }

@@ -185,7 +185,7 @@ class TradingEngine {
             (pos.state === PositionState.PENDING_RESOLUTION && trigger === CloseTrigger.MARKET_RESOLUTION);
 
         if (!isAllowedState) {
-            console.log(`[CLOSE-IGNORE] ${posKey} is ${pos.state}. Ignoring ${trigger}/${cause}`);
+            if (config.DEBUG_LOGS) console.log(`[CLOSE-IGNORE] ${posKey} is ${pos.state}. Ignoring ${trigger}/${cause}`);
             return;
         }
 
@@ -203,7 +203,7 @@ class TradingEngine {
         // 3. PRIORITY CHECK
         const incomingPriority = this.getPriority(trigger);
         if (pos.closePriority !== undefined && incomingPriority > pos.closePriority) {
-            console.log(`[CLOSE-IGNORE] Incoming priority ${incomingPriority} is lower priority (numerically higher) than existing ${pos.closePriority} for ${posKey}`);
+            if (config.DEBUG_LOGS) console.log(`[CLOSE-IGNORE] Incoming priority ${incomingPriority} is lower priority (numerically higher) than existing ${pos.closePriority} for ${posKey}`);
             return;
         }
 
@@ -238,7 +238,7 @@ class TradingEngine {
         pos.closeTrigger = trigger;
         pos.closeCause = cause;
 
-        console.log(`[CLOSE-EXEC] ${trigger} | ${cause} | ${posKey} @ $${exitPrice.toFixed(2)}`);
+        if (config.DEBUG_LOGS) console.log(`[CLOSE-EXEC] ${trigger} | ${cause} | ${posKey} @ $${exitPrice.toFixed(2)}`);
 
         // 6. EXECUTE LEDGER UPDATE
         // We pass the "Reason" string in the format "TRIGGER|CAUSE" to match LedgerService parsing logic
@@ -295,7 +295,7 @@ class TradingEngine {
 
         // --- SCAN INITIAL POSITIONS (BLACKLIST) ---
         if (FeatureSwitches.SKIP_ACTIVE_POSITIONS) {
-            console.log('[ENGINE] Scanning for existing positions to blacklist...');
+            if (config.DEBUG_LOGS) console.log('[ENGINE] Scanning for existing positions to blacklist...');
             try {
                 const currentPositions = await this.api.getPositions(config.PROFILE_ADDRESS);
                 if (currentPositions && Array.isArray(currentPositions)) {
@@ -454,7 +454,7 @@ class TradingEngine {
                     await Promise.allSettled(batch.map(pos => updatePositionPrice(pos)));
                 }
 
-                console.log(`[PRICE-UPDATE] ${posCount} positions | ${updated} updated | ${failed} failed | ${skippedNoToken} no-token | ${skippedNoCache} no-cache`);
+                if (config.DEBUG_LOGS && posCount > 0) console.log(`[PRICE-UPDATE] ${posCount} positions | ${updated} updated | ${failed} failed | ${skippedNoToken} no-token | ${skippedNoCache} no-cache`);
 
                 // Persist updates to disk
                 if (updated > 0) {
@@ -490,7 +490,7 @@ class TradingEngine {
                 // 3. Apply State Transitions
                 if (lifecycle.state === "PENDING_RESOLUTION") {
                     if (pos.state !== PositionState.PENDING_RESOLUTION && pos.state !== PositionState.CLOSED) {
-                        console.log(`[LIFECYCLE] Moving ${pos.marketName} to PENDING_RESOLUTION`);
+                        if (config.DEBUG_LOGS) console.log(`[LIFECYCLE] Moving ${pos.marketName} to PENDING_RESOLUTION`);
                         this.ledger.updatePositionState(pos.positionId || pos.marketId, PositionState.PENDING_RESOLUTION);
                     }
                 }
@@ -521,7 +521,7 @@ class TradingEngine {
                             const logExtra = lifecycle.marketType === "MULTI"
                                 ? `WinningSide: ${lifecycle.winningSide}, MySide: ${pos.side}`
                                 : `WinnerLabel: ${winningLabel}, MyLabel: ${pos.outcomeLabel}`;
-                            console.log(`[LIFECYCLE] Resolving ${pos.marketName} [${lifecycle.marketType}]. ${logExtra}. Result: ${isWinner ? 'WIN' : 'LOSS'}`);
+                            if (config.DEBUG_LOGS) console.log(`[LIFECYCLE] Resolving ${pos.marketName} [${lifecycle.marketType}]. ${logExtra}. Result: ${isWinner ? 'WIN' : 'LOSS'}`);
                             await this.settlePosition(
                                 pos.marketId,
                                 pos.side,
@@ -537,7 +537,7 @@ class TradingEngine {
                 else if (lifecycle.state === "ACTIVE") {
                     // Ensure state is OPEN if currently PENDING (reverted?)
                     if (pos.state === PositionState.PENDING_RESOLUTION) {
-                        console.log(`[LIFECYCLE] Reverting ${pos.marketName} to ACTIVE/OPEN`);
+                        if (config.DEBUG_LOGS) console.log(`[LIFECYCLE] Reverting ${pos.marketName} to ACTIVE/OPEN`);
                         this.ledger.updatePositionState(pos.positionId || pos.marketId, PositionState.OPEN);
                     }
                 }
@@ -574,11 +574,11 @@ class TradingEngine {
                     this.liquidityFailures.set(pos.marketId, fails);
 
                     if (fails < 3) {
-                        console.warn(`[LIQUIDITY-WARN] Empty book for ${pos.marketName} (${fails}/3). Waiting...`);
+                        if (config.DEBUG_LOGS) console.warn(`[LIQUIDITY-WARN] Empty book for ${pos.marketName} (${fails}/3). Waiting...`);
                         continue; // Don't close yet
                     }
 
-                    console.warn(`[LIQUIDITY-GUARD] No liquidity for ${pos.marketName} after 3 checks. Holding for resolution.`);
+                    if (config.DEBUG_LOGS) console.warn(`[LIQUIDITY-GUARD] No liquidity for ${pos.marketName} after 3 checks. Holding for resolution.`);
                     // await this.tryClosePosition(
                     //     pos.marketId,
                     //     pos.side,
@@ -787,7 +787,7 @@ class TradingEngine {
 
         // ===== 5. 1000 TICK PRICE GUARD (WAIT & RETRY) =====
         if (executionTick >= MAX_TICK) {
-            console.log(`[PRICE-GUARD] ⚠️ Execution tick is ${executionTick} (MAX) for ${outcomeLabel}. Waiting 30s...`);
+            if (config.DEBUG_LOGS) console.log(`[PRICE-GUARD] ⚠️ Execution tick is ${executionTick} (MAX) for ${outcomeLabel}. Waiting 30s...`);
             await new Promise(resolve => setTimeout(resolve, 30000));
 
             // Re-fetch Order Book
@@ -806,10 +806,10 @@ class TradingEngine {
             }
 
             if (executionTick >= MAX_TICK) {
-                console.log(`[PRICE-GUARD] ⛔ Tick still ${executionTick} after 30s. Skipping trade.`);
+                if (config.DEBUG_LOGS) console.log(`[PRICE-GUARD] ⛔ Tick still ${executionTick} after 30s. Skipping trade.`);
                 return;
             }
-            console.log(`[PRICE-GUARD] ✅ Tick dropped to ${executionTick}. Proceeding.`);
+            if (config.DEBUG_LOGS) console.log(`[PRICE-GUARD] ✅ Tick dropped to ${executionTick}. Proceeding.`);
         }
 
         // NEW: Fixed Share Multiplier Logic
@@ -1014,7 +1014,7 @@ class TradingEngine {
             }
 
             if (config.DEBUG_LOGS) {
-                console.log(`[WS] Updating subscription for ${uniqueTokens.length} tokens: ${uniqueTokens.map(t => t.substring(0, 6)).join(', ')}...`);
+                if (config.DEBUG_LOGS) console.log(`[WS] Updating subscription for ${uniqueTokens.length} tokens: ${uniqueTokens.map(t => t.substring(0, 6)).join(', ')}...`);
             }
 
             this.api.subscribeToOrderbook(uniqueTokens, (data: any) => {
