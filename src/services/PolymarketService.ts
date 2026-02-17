@@ -289,6 +289,11 @@ export class PolymarketService {
     }
   }
 
+  /**
+   * @deprecated This method returns STALE cached prices from Gamma API, not live orderbook data.
+   * For accurate real-time prices, use getOrderBookForToken() or getLivePrice() instead.
+   * Only use this for initial market metadata, not for trading decisions.
+   */
   public async getOutcomePrices(marketId: string): Promise<number[] | null> {
     try {
       const res = await this.gammaApiClient.get(`/markets/${marketId}`, { timeout: 2000 });

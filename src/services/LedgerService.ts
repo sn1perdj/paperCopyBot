@@ -7,7 +7,7 @@ class LedgerService {
   private static instance: LedgerService;
   private ledgerPath: string;
   private state: LedgerSchema;
-  public priceCache: Record<string, number> = {};
+  public priceCache: Record<string, { price: number; timestamp: number }> = {};
 
   private constructor() {
     this.ledgerPath = path.join(process.cwd(), 'data', 'ledger.json');
@@ -43,7 +43,7 @@ class LedgerService {
     return { balance: 1000, positions: {}, closedPositions: [], tradeEvents: [], marketCache: {}, processedTxHashes: [] };
   }
 
-  private save(): void {
+  public save(): void {
     fs.writeFileSync(this.ledgerPath, JSON.stringify(this.state, null, 2));
   }
 
@@ -101,21 +101,28 @@ class LedgerService {
 
 
   public updateRealTimePrice(marketId: string, price: number, tokenId?: string) {
-    this.priceCache[marketId] = price;
+    // === CRITICAL FIX: Key cache by tokenId for MULTI markets ===
+    // Previously used marketId, but MULTI markets have multiple outcomes/tokens
+    // sharing the same marketId, causing cache collisions.
+    const cacheKey = tokenId || marketId;
+    this.priceCache[cacheKey] = { price, timestamp: Date.now() };
 
     // FIX: Instantly update active positions to avoid waiting for polling loop
     const keys = Object.keys(this.state.positions);
+    let updated = false;
     for (const key of keys) {
       const pos = this.state.positions[key];
       if (pos.marketId === marketId) {
         // 1. If we matched by tokenId, use direct price (Multi-Outcome)
         if (tokenId && pos.tokenId === tokenId) {
           pos.currentPrice = price;
+          updated = true;
         }
         // 2. Backward compatibility: Binary side-based inversion
         else if (!tokenId) {
           const exitPrice = pos.side === 'YES' ? price : (1 - price);
           pos.currentPrice = exitPrice;
+          updated = true;
         }
         else {
           continue; // Different token in same market
@@ -132,6 +139,11 @@ class LedgerService {
         pos.currentValue = pos.currentPrice * pos.size;
         pos.unrealizedPnL = pos.currentValue - pos.investedUsd;
       }
+    }
+
+    // === CRITICAL FIX: Persist price updates to disk ===
+    if (updated) {
+      this.save();
     }
   }
 

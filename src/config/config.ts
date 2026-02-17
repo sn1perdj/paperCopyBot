@@ -38,7 +38,7 @@ export const config: Config = {
   EXPECTED_EDGE: parseFloatEnv('EXPECTED_EDGE', 0.06), // Default 6% edge
   SLIPPAGE_DELAY_PENALTY: parseFloatEnv('SLIPPAGE_DELAY_PENALTY', 0.003), // Default 0.3%
   ENABLE_TRADE_FILTERS: false, // ⚠️ CHANGE TO false TO DISABLE ALL SAFETY CHECKS (Slippage & Profitability)
-  DEBUG_LOGS: process.env.DEBUG_LOGS === 'true' || process.env.DEBUG_LOGS === '1',
+  DEBUG_LOGS: true, // Temporarily enabled for debugging price updates
   FIXED_COPY_PCT: parseFloatEnv('FIXED_COPY_PCT', 0.10), // 10% of target's share count
   MIN_ORDER_SIZE_SHARES: parseFloatEnv('MIN_ORDER_SIZE_SHARES', 1), // Minimum shares to execute
   START_FROM_NOW: process.env.START_FROM_NOW !== 'false', // Default true (only process new trades)

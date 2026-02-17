@@ -359,29 +359,99 @@ class TradingEngine {
 
                 // ===== PRICE UPDATE FALLBACK (REST for markets without WS) =====
                 const positions = this.ledger.getPositions();
+                const posCount = Object.values(positions).length;
+                console.log(`[PRICE-UPDATE-DEBUG] Starting price update loop for ${posCount} positions`);
+
+                let skippedCache = 0;
+                let skippedNoToken = 0;
+                let updated = 0;
+                let failed = 0;
 
                 for (const pos of Object.values(positions)) {
                     try {
-                        // Skip if WebSocket is already providing real-time data
-                        if (this.ledger.priceCache[pos.marketId]) {
+                        // === CRITICAL FIX: Check cache by tokenId with 30s expiry ===
+                        // Skip if WebSocket provided recent data (< 30 seconds old)
+                        const cacheKey = pos.tokenId || pos.marketId;
+                        const cached = this.ledger.priceCache[cacheKey];
+                        const now = Date.now();
+                        const CACHE_EXPIRY_MS = 30000; // 30 seconds
+
+                        if (cached && (now - cached.timestamp) < CACHE_EXPIRY_MS) {
+                            skippedCache++;
+                            // DISABLED CACHE: Always fetch fresh prices per user request
+                            // console.log(`[PRICE-UPDATE-DEBUG] Skipped ${pos.marketName.substring(0, 30)}... (cached ${((now - cached.timestamp) / 1000).toFixed(0)}s ago)`);
+                            // continue;
+                        } else if (cached) {
+                            console.log(`[PRICE-UPDATE-DEBUG] Cache expired for ${pos.marketName.substring(0, 30)}... (${((now - cached.timestamp) / 1000).toFixed(0)}s old), fetching fresh`);
+                        }
+
+                        // NEW: Use live orderbook instead of stale Gamma API prices
+                        // Fetch orderbook for the specific token to get real-time prices
+                        if (!pos.tokenId) {
+                            // If no tokenId, skip this position (legacy positions)
+                            skippedNoToken++;
+                            if (config.DEBUG_LOGS) console.warn(`[PRICE-UPDATE] No tokenId for ${pos.marketName}, skipping live price update`);
                             continue;
                         }
 
-                        // Fallback: Fetch from REST API only if no WebSocket data
-                        const prices = await this.api.getOutcomePrices(pos.marketId);
-                        if (prices && prices.length >= 2 && (prices[0] + prices[1] > 0)) {
-                            // API returns prices as [NO_price, YES_price] (based on ["No", "Yes"] outcome order)
-                            const exitPrice = pos.side === 'YES' ? prices[1] : prices[0];
+                        // === MULTI-OUTCOME FIX: Always fetch YES token's orderbook ===
+                        // clobTokenIds ordering is NOT guaranteed. We must dynamically
+                        // determine which token is YES by finding the OTHER token.
+                        // For NO pos: pos.tokenId = NO token, other = YES token
+                        // For YES pos: pos.tokenId = YES token, use directly
+                        let fetchTokenId = pos.tokenId;
+                        let isNOposition = false;
 
-                            if (!isNaN(exitPrice)) {
-                                pos.currentPrice = exitPrice;
-                                pos.currentValue = exitPrice * pos.size;
-                                pos.unrealizedPnL = pos.currentValue - pos.investedUsd;
+                        if (pos.marketType === 'MULTI' && pos.side === 'NO') {
+                            const cache = this.ledger.getMarketCache(pos.marketId);
+                            if (cache?.clobTokenIds && cache.clobTokenIds.length >= 2) {
+                                // Find the OTHER token (YES) - the one that is NOT our NO tokenId
+                                const yesToken = cache.clobTokenIds.find((t: string) => t !== pos.tokenId);
+                                if (yesToken) {
+                                    fetchTokenId = yesToken;
+                                    isNOposition = true;
+                                }
                             }
                         }
+                        // YES positions: pos.tokenId IS the YES token, fetch directly (no swap needed)
+
+                        console.log(`[PRICE-UPDATE-DEBUG] Fetching orderbook for ${pos.marketName.substring(0, 30)}... | Token: ${fetchTokenId.substring(0, 8)}...`);
+                        const orderBook = await this.api.getOrderBookForToken(fetchTokenId, pos.marketId);
+                        if (orderBook && orderBook.bids.length > 0 && orderBook.asks.length > 0) {
+                            const bestBid = orderBook.bids[0].price;
+                            const bestAsk = orderBook.asks[0].price;
+                            const yesMidPrice = (bestBid + bestAsk) / 2;
+
+                            // Derive price based on position side
+                            // YES positions: use YES price directly
+                            // NO positions: use complement (1 - YES price)
+                            const currentPrice = isNOposition ? (1 - yesMidPrice) : yesMidPrice;
+
+                            if (!isNaN(currentPrice) && currentPrice > 0) {
+                                const oldPrice = pos.currentPrice;
+                                pos.currentPrice = currentPrice;
+                                pos.currentValue = currentPrice * pos.size;
+                                pos.unrealizedPnL = pos.currentValue - pos.investedUsd;
+                                updated++;
+
+                                console.log(`[PRICE-UPDATE] ${pos.marketName.substring(0, 30)}... | ${pos.side}${isNOposition ? ' (from YES book)' : ''} | Old: $${oldPrice?.toFixed(4) || 'N/A'} → New: $${currentPrice.toFixed(4)} (YES mid: ${yesMidPrice.toFixed(4)})`);
+                            }
+                        } else {
+                            failed++;
+                            console.log(`[PRICE-UPDATE-DEBUG] Empty orderbook for ${pos.marketName.substring(0, 30)}...`);
+                        }
                     } catch (err: any) {
-                        console.error(`[ENGINE] Price update failed for ${pos.marketId}:`, err.message);
+                        failed++;
+                        console.error(`[PRICE-UPDATE-DEBUG] Error for ${pos.marketId.substring(0, 8)}...: ${err.message}`);
                     }
+                }
+
+                console.log(`[PRICE-UPDATE-DEBUG] Summary: ${posCount} total | ${updated} updated | ${skippedCache} cached | ${skippedNoToken} no-token | ${failed} failed`);
+
+                // === CRITICAL FIX: Persist REST price updates to disk ===
+                if (updated > 0) {
+                    console.log(`[PRICE-UPDATE] Persisting ${updated} price updates to ledger.json`);
+                    this.ledger.save();
                 }
 
 
@@ -909,10 +979,23 @@ class TradingEngine {
             const positions = this.ledger.getPositions();
             const tokenIds = new Set<string>();
 
-            // Collect all unique token IDs from open positions
+            // === MULTI-OUTCOME FIX: Subscribe to YES tokens for all positions ===
+            // For MULTI NO positions, subscribe to the YES token instead,
+            // so we get the correct price to derive NO as complement.
             Object.values(positions).forEach(p => {
                 if (p.state === PositionState.OPEN && p.tokenId) {
-                    tokenIds.add(p.tokenId);
+                    if (p.marketType === 'MULTI' && p.side === 'NO') {
+                        // Find YES token dynamically (the OTHER token, not pos.tokenId)
+                        const cache = this.ledger.getMarketCache(p.marketId);
+                        if (cache?.clobTokenIds && cache.clobTokenIds.length >= 2) {
+                            const yesToken = cache.clobTokenIds.find((t: string) => t !== p.tokenId);
+                            tokenIds.add(yesToken || p.tokenId);
+                        } else {
+                            tokenIds.add(p.tokenId); // Fallback to position's token
+                        }
+                    } else {
+                        tokenIds.add(p.tokenId);
+                    }
                 }
             });
 
@@ -920,9 +1003,6 @@ class TradingEngine {
 
             if (uniqueTokens.length === 0) {
                 if (config.DEBUG_LOGS) console.log('[WS] No active positions. Unsubscribing/Idle.');
-                // graceful unsubscribe or close if implementation supports it
-                // For now, checks inside api.subscribeToOrderbook handles it or we can close
-                // this.api.close(); // Optional: Close if you want to save resources
                 return;
             }
 
@@ -969,49 +1049,58 @@ class TradingEngine {
         // Re-looking up is safer for "current state".
 
         const positions = this.ledger.getPositions();
-        const tokenMetaMap = new Map<string, { marketId: string }>();
+
+        // === MULTI-OUTCOME FIX: Build mapping from YES tokenId → position metadata ===
+        // For MULTI NO positions, we subscribed to the YES token, so we need to map
+        // YES token updates back to the correct position and derive NO price.
+        interface TokenMeta { marketId: string; side: 'YES' | 'NO'; marketType?: string; posTokenId: string; }
+        const tokenMetaMap = new Map<string, TokenMeta>();
 
         Object.values(positions).forEach(p => {
             if (p.state === PositionState.OPEN && p.tokenId) {
-                tokenMetaMap.set(p.tokenId, { marketId: p.marketId });
+                if (p.marketType === 'MULTI' && p.side === 'NO') {
+                    // Find YES token dynamically (the OTHER token, not pos.tokenId)
+                    const cache = this.ledger.getMarketCache(p.marketId);
+                    if (cache?.clobTokenIds && cache.clobTokenIds.length >= 2) {
+                        const yesToken = cache.clobTokenIds.find((t: string) => t !== p.tokenId);
+                        if (yesToken) tokenMetaMap.set(yesToken, { marketId: p.marketId, side: 'NO', marketType: p.marketType, posTokenId: p.tokenId });
+                    }
+                } else {
+                    tokenMetaMap.set(p.tokenId, { marketId: p.marketId, side: p.side, marketType: p.marketType, posTokenId: p.tokenId });
+                }
             }
         });
 
         for (const update of updates) {
-            // Polymarket WS usually sends: { asset_id: "...", price: "..." } or similar orderbook updates
-            // Adjust validation based on actual payload structure. 
-            // Assuming simplified "price update" or "orderbook" for now.
-            // If it is orderbook:
-            /*
-            {
-                "asset_id": "422...",
-                "bids": [{"price": "0.50", "size": "100"}],
-                "asks": [...]
-            }
-            */
             const tokenId = update.asset_id || update.token_id;
             if (!tokenId || !tokenMetaMap.has(tokenId)) continue;
 
             const meta = tokenMetaMap.get(tokenId)!;
 
-            // Calculate Midpoint
-            let midPrice = 0;
+            // Calculate YES token midpoint
+            let yesMidPrice = 0;
 
             // Case A: Full Orderbook Update
             if (update.bids && update.asks) {
                 const bestBid = update.bids.length > 0 ? parseFloat(update.bids[0].price) : 0;
                 const bestAsk = update.asks.length > 0 ? parseFloat(update.asks[0].price) : 0;
-                if (bestBid > 0 && bestAsk > 0) midPrice = (bestBid + bestAsk) / 2;
-                else if (bestBid > 0) midPrice = bestBid;
-                else if (bestAsk > 0) midPrice = bestAsk;
+                if (bestBid > 0 && bestAsk > 0) yesMidPrice = (bestBid + bestAsk) / 2;
+                else if (bestBid > 0) yesMidPrice = bestBid;
+                else if (bestAsk > 0) yesMidPrice = bestAsk;
             }
             // Case B: Price Change / Ticker
             else if (update.price) {
-                midPrice = parseFloat(update.price);
+                yesMidPrice = parseFloat(update.price);
             }
 
-            if (midPrice > 0) {
-                this.ledger.updateRealTimePrice(meta.marketId, midPrice, tokenId);
+            if (yesMidPrice > 0) {
+                // For MULTI NO positions: derive price as complement of YES price
+                const isMultiNO = meta.marketType === 'MULTI' && meta.side === 'NO';
+                const finalPrice = isMultiNO ? (1 - yesMidPrice) : yesMidPrice;
+
+                if (finalPrice > 0) {
+                    this.ledger.updateRealTimePrice(meta.marketId, finalPrice, meta.posTokenId);
+                }
             }
         }
     }
