@@ -226,67 +226,67 @@ export class PolymarketService {
   }
 
   public async getOrderBookForToken(tokenId: string, marketIdContext?: string): Promise<OrderBook | null> {
-    try {
-      const url = `https://clob.polymarket.com/book?token_id=${tokenId}`;
-      const contextId = marketIdContext ? marketIdContext.substring(0, 8) : tokenId.substring(0, 8);
+    const url = `https://clob.polymarket.com/book?token_id=${tokenId}`;
+    const contextId = marketIdContext ? marketIdContext.substring(0, 8) : tokenId.substring(0, 8);
+    const MAX_ATTEMPTS = 2; // 1 initial + 1 retry
 
-      const res = await fetch(url, {
-        signal: AbortSignal.timeout(3000)
-      });
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const res = await fetch(url, {
+          signal: AbortSignal.timeout(5000) // 5 seconds
+        });
 
-      if (!res.ok) {
-        console.debug(`[ORDERBOOK] HTTP ${res.status} for token ${tokenId.substring(0, 8)}...`);
+        if (!res.ok) {
+          if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] HTTP ${res.status} for ${contextId}... (attempt ${attempt})`);
+          if (attempt < MAX_ATTEMPTS) { await new Promise(r => setTimeout(r, 300)); continue; }
+          return null;
+        }
+
+        const book = await res.json();
+        if (!book || typeof book !== 'object') {
+          return null;
+        }
+
+        const bids: OrderBookLevel[] = (book?.bids || []).map((l: any) => ({
+          price: Number(l.price),
+          size: Number(l.size)
+        }));
+
+        const asks: OrderBookLevel[] = (book?.asks || []).map((l: any) => ({
+          price: Number(l.price),
+          size: Number(l.size)
+        }));
+
+        bids.sort((a, b) => b.price - a.price);
+        asks.sort((a, b) => a.price - b.price);
+
+        if (bids.length > 0 && asks.length > 0) {
+          const bestBid = bids[0].price;
+          const bestAsk = asks[0].price;
+          const spread = ((bestAsk - bestBid) / ((bestAsk + bestBid) / 2) * 100).toFixed(2);
+          const totalBidDepth = bids.reduce((sum, b) => sum + (b.price * b.size), 0);
+          const totalAskDepth = asks.reduce((sum, a) => sum + (a.price * a.size), 0);
+
+          if (config.DEBUG_LOGS) console.debug(
+            `[ORDERBOOK ✓] ${contextId}... | Bid: ${bestBid.toFixed(4)} | Ask: ${bestAsk.toFixed(4)} | Spread: ${spread}% | Depth: $${(totalBidDepth + totalAskDepth).toFixed(0)}`
+          );
+        } else {
+          if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Empty book for ${contextId}...`);
+        }
+
+        return { bids, asks };
+
+      } catch (e: any) {
+        if (e.name === 'AbortError') {
+          if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Timeout (5s) for ${contextId}... (attempt ${attempt})`);
+        } else {
+          if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Error for ${contextId}...: ${e.message} (attempt ${attempt})`);
+        }
+        if (attempt < MAX_ATTEMPTS) { await new Promise(r => setTimeout(r, 300)); continue; }
         return null;
       }
-
-      const book = await res.json();
-
-      // Validate book structure
-      if (!book || typeof book !== 'object') {
-        return null;
-      }
-
-      // Parse bids and asks with proper structure
-      const bids: OrderBookLevel[] = (book?.bids || []).map((l: any) => ({
-        price: Number(l.price),
-        size: Number(l.size)
-      }));
-
-      const asks: OrderBookLevel[] = (book?.asks || []).map((l: any) => ({
-        price: Number(l.price),
-        size: Number(l.size)
-      }));
-
-      // Sort bids descending (highest first) and asks ascending (lowest first)
-      bids.sort((a, b) => b.price - a.price);
-      asks.sort((a, b) => a.price - b.price);
-
-      // Log successful fetch with book depth info
-      if (bids.length > 0 && asks.length > 0) {
-        const bestBid = bids[0].price;
-        const bestAsk = asks[0].price;
-        const spread = ((bestAsk - bestBid) / ((bestAsk + bestBid) / 2) * 100).toFixed(2);
-        const totalBidDepth = bids.reduce((sum, b) => sum + (b.price * b.size), 0);
-        const totalAskDepth = asks.reduce((sum, a) => sum + (a.price * a.size), 0);
-
-        if (config.DEBUG_LOGS) console.debug(
-          `[ORDERBOOK ✓] ${contextId}... | Bid: ${bestBid.toFixed(4)} | Ask: ${bestAsk.toFixed(4)} | Spread: ${spread}% | Depth: $${(totalBidDepth + totalAskDepth).toFixed(0)}`
-        );
-      } else {
-        if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Empty book for ${contextId}...`);
-      }
-
-      return { bids, asks };
-
-    } catch (e: any) {
-      const contextId = marketIdContext ? marketIdContext.substring(0, 8) : tokenId.substring(0, 8);
-      if (e.name === 'AbortError') {
-        if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Timeout (3s) fetching ${contextId}...`);
-      } else {
-        if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] Error for ${contextId}...: ${e.message}`);
-      }
-      return null;
     }
+    return null;
   }
 
   /**

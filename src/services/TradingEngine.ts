@@ -357,100 +357,107 @@ class TradingEngine {
 
                 tickCount++;
 
-                // ===== PRICE UPDATE FALLBACK (REST for markets without WS) =====
+                // ===== PRICE UPDATE (REST - fetches live orderbook for every OPEN position) =====
                 const positions = this.ledger.getPositions();
-                const posCount = Object.values(positions).length;
-                console.log(`[PRICE-UPDATE-DEBUG] Starting price update loop for ${posCount} positions`);
+                const openPositions = Object.values(positions).filter(p => p.state === 'OPEN');
+                const posCount = openPositions.length;
 
-                let skippedCache = 0;
                 let skippedNoToken = 0;
+                let skippedNoCache = 0;
                 let updated = 0;
                 let failed = 0;
 
-                for (const pos of Object.values(positions)) {
+                // --- Helper: update a single position's price ---
+                const updatePositionPrice = async (pos: any) => {
                     try {
-                        // === CRITICAL FIX: Check cache by tokenId with 30s expiry ===
-                        // Skip if WebSocket provided recent data (< 30 seconds old)
-                        const cacheKey = pos.tokenId || pos.marketId;
-                        const cached = this.ledger.priceCache[cacheKey];
-                        const now = Date.now();
-                        const CACHE_EXPIRY_MS = 30000; // 30 seconds
-
-                        if (cached && (now - cached.timestamp) < CACHE_EXPIRY_MS) {
-                            skippedCache++;
-                            // DISABLED CACHE: Always fetch fresh prices per user request
-                            // console.log(`[PRICE-UPDATE-DEBUG] Skipped ${pos.marketName.substring(0, 30)}... (cached ${((now - cached.timestamp) / 1000).toFixed(0)}s ago)`);
-                            // continue;
-                        } else if (cached) {
-                            console.log(`[PRICE-UPDATE-DEBUG] Cache expired for ${pos.marketName.substring(0, 30)}... (${((now - cached.timestamp) / 1000).toFixed(0)}s old), fetching fresh`);
-                        }
-
-                        // NEW: Use live orderbook instead of stale Gamma API prices
-                        // Fetch orderbook for the specific token to get real-time prices
                         if (!pos.tokenId) {
-                            // If no tokenId, skip this position (legacy positions)
                             skippedNoToken++;
-                            if (config.DEBUG_LOGS) console.warn(`[PRICE-UPDATE] No tokenId for ${pos.marketName}, skipping live price update`);
-                            continue;
+                            return;
                         }
 
-                        // === MULTI-OUTCOME FIX: Always fetch YES token's orderbook ===
-                        // clobTokenIds ordering is NOT guaranteed. We must dynamically
-                        // determine which token is YES by finding the OTHER token.
-                        // For NO pos: pos.tokenId = NO token, other = YES token
-                        // For YES pos: pos.tokenId = YES token, use directly
                         let fetchTokenId = pos.tokenId;
                         let isNOposition = false;
 
+                        // MULTI NO positions: find the YES token dynamically
                         if (pos.marketType === 'MULTI' && pos.side === 'NO') {
                             const cache = this.ledger.getMarketCache(pos.marketId);
                             if (cache?.clobTokenIds && cache.clobTokenIds.length >= 2) {
-                                // Find the OTHER token (YES) - the one that is NOT our NO tokenId
                                 const yesToken = cache.clobTokenIds.find((t: string) => t !== pos.tokenId);
                                 if (yesToken) {
                                     fetchTokenId = yesToken;
                                     isNOposition = true;
                                 }
+                            } else {
+                                // No cache for MULTI NO → can't determine YES token, skip
+                                skippedNoCache++;
+                                return;
                             }
                         }
-                        // YES positions: pos.tokenId IS the YES token, fetch directly (no swap needed)
 
-                        console.log(`[PRICE-UPDATE-DEBUG] Fetching orderbook for ${pos.marketName.substring(0, 30)}... | Token: ${fetchTokenId.substring(0, 8)}...`);
                         const orderBook = await this.api.getOrderBookForToken(fetchTokenId, pos.marketId);
-                        if (orderBook && orderBook.bids.length > 0 && orderBook.asks.length > 0) {
-                            const bestBid = orderBook.bids[0].price;
-                            const bestAsk = orderBook.asks[0].price;
-                            const yesMidPrice = (bestBid + bestAsk) / 2;
+                        let yesMidPrice: number | null = null;
 
-                            // Derive price based on position side
-                            // YES positions: use YES price directly
-                            // NO positions: use complement (1 - YES price)
-                            const currentPrice = isNOposition ? (1 - yesMidPrice) : yesMidPrice;
-
-                            if (!isNaN(currentPrice) && currentPrice > 0) {
-                                const oldPrice = pos.currentPrice;
-                                pos.currentPrice = currentPrice;
-                                pos.currentValue = currentPrice * pos.size;
-                                pos.unrealizedPnL = pos.currentValue - pos.investedUsd;
-                                updated++;
-
-                                console.log(`[PRICE-UPDATE] ${pos.marketName.substring(0, 30)}... | ${pos.side}${isNOposition ? ' (from YES book)' : ''} | Old: $${oldPrice?.toFixed(4) || 'N/A'} → New: $${currentPrice.toFixed(4)} (YES mid: ${yesMidPrice.toFixed(4)})`);
+                        if (orderBook) {
+                            if (orderBook.bids.length > 0 && orderBook.asks.length > 0) {
+                                // Full book: use mid-price
+                                yesMidPrice = (orderBook.bids[0].price + orderBook.asks[0].price) / 2;
+                            } else if (orderBook.bids.length > 0) {
+                                // Only bids: use best bid as estimate
+                                yesMidPrice = orderBook.bids[0].price;
+                            } else if (orderBook.asks.length > 0) {
+                                // Only asks: use best ask as estimate
+                                yesMidPrice = orderBook.asks[0].price;
                             }
-                        } else {
+                        }
+
+                        // Fallback: use cached model price if orderbook is completely empty
+                        if (yesMidPrice === null) {
+                            const cache = this.ledger.getMarketCache(pos.marketId);
+                            if (cache?.model?.outcomes) {
+                                const yesOutcome = cache.model.outcomes.find((o: any) => o.label === 'Yes');
+                                if (yesOutcome?.price != null) {
+                                    yesMidPrice = yesOutcome.price;
+                                }
+                            }
+                        }
+
+                        if (yesMidPrice === null) {
                             failed++;
-                            console.log(`[PRICE-UPDATE-DEBUG] Empty orderbook for ${pos.marketName.substring(0, 30)}...`);
+                            return;
+                        }
+
+                        // Derive price: YES = direct, NO = complement
+                        const currentPrice = isNOposition ? (1 - yesMidPrice) : yesMidPrice;
+
+                        // >= 0 allows valid 0¢ prices (e.g., NO when YES is 100%)
+                        if (!isNaN(currentPrice) && currentPrice >= 0) {
+                            const oldPrice = pos.currentPrice;
+                            pos.currentPrice = currentPrice;
+                            pos.currentValue = currentPrice * pos.size;
+                            pos.unrealizedPnL = pos.currentValue - pos.investedUsd;
+                            try { if (pos.currentPrice !== undefined) { pos.currentTick = Math.round(pos.currentPrice * 1000); } } catch (e) { }
+                            updated++;
+
+                            if (config.DEBUG_LOGS) {
+                                console.log(`[PRICE-UPDATE] ${pos.marketName.substring(0, 30)}... | ${pos.side}${isNOposition ? ' (YES→NO)' : ''} | ${oldPrice?.toFixed(4) || '?'} → ${currentPrice.toFixed(4)}`);
+                            }
                         }
                     } catch (err: any) {
                         failed++;
-                        console.error(`[PRICE-UPDATE-DEBUG] Error for ${pos.marketId.substring(0, 8)}...: ${err.message}`);
                     }
+                };
+
+                // --- Batched concurrent fetches (5 at a time) ---
+                const BATCH_SIZE = 5;
+                for (let i = 0; i < openPositions.length; i += BATCH_SIZE) {
+                    const batch = openPositions.slice(i, i + BATCH_SIZE);
+                    await Promise.allSettled(batch.map(pos => updatePositionPrice(pos)));
                 }
 
-                console.log(`[PRICE-UPDATE-DEBUG] Summary: ${posCount} total | ${updated} updated | ${skippedCache} cached | ${skippedNoToken} no-token | ${failed} failed`);
+                console.log(`[PRICE-UPDATE] ${posCount} positions | ${updated} updated | ${failed} failed | ${skippedNoToken} no-token | ${skippedNoCache} no-cache`);
 
-                // === CRITICAL FIX: Persist REST price updates to disk ===
+                // Persist updates to disk
                 if (updated > 0) {
-                    console.log(`[PRICE-UPDATE] Persisting ${updated} price updates to ledger.json`);
                     this.ledger.save();
                 }
 
