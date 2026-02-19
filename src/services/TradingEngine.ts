@@ -21,6 +21,7 @@ class TradingEngine {
     private retryHelper: RetryHelper;
     private positionFilter: PositionFilter;
     private isPolling = false;
+    private processedTxHashes: Set<string> = new Set();
     // Initialize startup time based on config preference
     private botStartupTime: number = config.START_FROM_NOW
         ? Date.now()
@@ -48,6 +49,11 @@ class TradingEngine {
 
         this.settingsPath = path.join(process.cwd(), 'trade_settings.json');
         this.loadSettings();
+
+        // Pre-populate dedup set from existing trade events (O(1) lookups instead of O(n))
+        for (const ev of this.ledger.getTradeEvents()) {
+            if (ev.eventId) this.processedTxHashes.add(ev.eventId);
+        }
     }
 
     public static getInstance() {
@@ -230,8 +236,8 @@ class TradingEngine {
                     exitPrice = (cause === CloseCause.WINNER_YES && side === 'YES') ||
                         (cause === CloseCause.WINNER_NO && side === 'NO') ? 1.0 : 0.0;
                 } else {
-                    // Market-based close
-                    const marketPrice = await this.api.getLivePrice(marketId);
+                    // Market-based close — pass tokenId to skip metadata re-fetch
+                    const marketPrice = await this.api.getLivePrice(marketId, pos.tokenId);
                     if (marketPrice) {
                         exitPrice = side === 'YES' ? marketPrice.bestBid : (1 - marketPrice.bestAsk);
                     } else {
@@ -354,15 +360,50 @@ class TradingEngine {
         this.updateWebsocketSubscription();
         setInterval(() => this.updateWebsocketSubscription(), 60000); // Check for new positions every minute
 
-        let tickCount = 0;
+        // === SEPARATED LOOPS: Trade detection runs in a tight fast loop ===
+        // Background tasks (price updates, lifecycle, liquidity) run on independent intervals
+        // so they NEVER block trade detection.
 
+        // --- Background: Price updates (every 3s) ---
+        const priceUpdateInterval = setInterval(async () => {
+            if (!this.isPolling) return;
+            try {
+                await this.updateAllPrices();
+            } catch (e: any) {
+                this.flog.error('Price update error', { error: e.message });
+            }
+        }, 3000);
+
+        // --- Background: Lifecycle management (every 30s) ---
+        const lifecycleInterval = setInterval(async () => {
+            if (!this.isPolling) return;
+            try {
+                await this.manageLifecycle();
+            } catch (e: any) {
+                this.flog.error('Lifecycle error', { error: e.message });
+            }
+        }, 30000);
+
+        // --- Background: Liquidity checks (every 15s) ---
+        const liquidityInterval = setInterval(async () => {
+            if (!this.isPolling) return;
+            try {
+                await this.checkLiquidity();
+            } catch (e: any) {
+                this.flog.error('Liquidity check error', { error: e.message });
+            }
+        }, 15000);
+
+        // Don't prevent process exit
+        [priceUpdateInterval, lifecycleInterval, liquidityInterval].forEach(iv => {
+            if (iv.unref) iv.unref();
+        });
+
+        // --- FAST TRADE DETECTION LOOP (only polls for new trades) ---
         while (this.isPolling) {
             try {
-
-
                 const activities = await this.api.getUserActivity(config.PROFILE_ADDRESS);
                 const fetchTime = Date.now();
-                // Process chronologically (Oldest -> Newest) to ensure correct ledger order
                 const sortedActivities = activities.reverse();
 
                 for (const act of sortedActivities) {
@@ -370,124 +411,6 @@ class TradingEngine {
                         await this.processAutoTrade(act, fetchTime);
                     }
                 }
-
-                if (tickCount % 10 === 0) {
-                    await this.manageLifecycle();
-                }
-
-                // CHECK LIQUIDITY (Guard)
-                if (tickCount % 5 === 0) { // Check every 5 ticks (~5-10s)
-                    await this.checkLiquidity();
-                }
-
-                tickCount++;
-
-                // ===== PRICE UPDATE (REST - fetches live orderbook for every OPEN position) =====
-                const positions = this.ledger.getPositions();
-                const openPositions = Object.values(positions).filter(p => p.state === 'OPEN');
-                const posCount = openPositions.length;
-
-                let skippedNoToken = 0;
-                let skippedNoCache = 0;
-                let updated = 0;
-                let failed = 0;
-
-                // --- Helper: update a single position's price ---
-                const updatePositionPrice = async (pos: any) => {
-                    try {
-                        if (!pos.tokenId) {
-                            skippedNoToken++;
-                            return;
-                        }
-
-                        let fetchTokenId = pos.tokenId;
-                        let isNOposition = false;
-
-                        // MULTI NO positions: find the YES token dynamically
-                        if (pos.marketType === 'MULTI' && pos.side === 'NO') {
-                            const cache = this.ledger.getMarketCache(pos.marketId);
-                            if (cache?.clobTokenIds && cache.clobTokenIds.length >= 2) {
-                                const yesToken = cache.clobTokenIds.find((t: string) => t !== pos.tokenId);
-                                if (yesToken) {
-                                    fetchTokenId = yesToken;
-                                    isNOposition = true;
-                                }
-                            } else {
-                                // No cache for MULTI NO → can't determine YES token, skip
-                                skippedNoCache++;
-                                return;
-                            }
-                        }
-
-                        const orderBook = await this.api.getOrderBookForToken(fetchTokenId, pos.marketId);
-                        let yesMidPrice: number | null = null;
-
-                        if (orderBook) {
-                            if (orderBook.bids.length > 0 && orderBook.asks.length > 0) {
-                                // Full book: use mid-price
-                                yesMidPrice = (orderBook.bids[0].price + orderBook.asks[0].price) / 2;
-                            } else if (orderBook.bids.length > 0) {
-                                // Only bids: use best bid as estimate
-                                yesMidPrice = orderBook.bids[0].price;
-                            } else if (orderBook.asks.length > 0) {
-                                // Only asks: use best ask as estimate
-                                yesMidPrice = orderBook.asks[0].price;
-                            }
-                        }
-
-                        // Fallback: use cached model price if orderbook is completely empty
-                        if (yesMidPrice === null) {
-                            const cache = this.ledger.getMarketCache(pos.marketId);
-                            if (cache?.model?.outcomes) {
-                                const yesOutcome = cache.model.outcomes.find((o: any) => o.label === 'Yes');
-                                if (yesOutcome?.price != null) {
-                                    yesMidPrice = yesOutcome.price;
-                                }
-                            }
-                        }
-
-                        if (yesMidPrice === null) {
-                            failed++;
-                            return;
-                        }
-
-                        // Derive price: YES = direct, NO = complement
-                        const currentPrice = isNOposition ? (1 - yesMidPrice) : yesMidPrice;
-
-                        // >= 0 allows valid 0¢ prices (e.g., NO when YES is 100%)
-                        if (!isNaN(currentPrice) && currentPrice >= 0) {
-                            const oldPrice = pos.currentPrice;
-                            pos.currentPrice = currentPrice;
-                            pos.currentValue = currentPrice * pos.size;
-                            pos.unrealizedPnL = pos.currentValue - pos.investedUsd;
-                            try { if (pos.currentPrice !== undefined) { pos.currentTick = Math.round(pos.currentPrice * 1000); } } catch (e) { }
-                            updated++;
-
-                            if (config.DEBUG_LOGS) {
-                                console.log(`[PRICE-UPDATE] ${pos.marketName.substring(0, 30)}... | ${pos.side}${isNOposition ? ' (YES→NO)' : ''} | ${oldPrice?.toFixed(4) || '?'} → ${currentPrice.toFixed(4)}`);
-                            }
-                        }
-                    } catch (err: any) {
-                        failed++;
-                    }
-                };
-
-                // --- Batched concurrent fetches (5 at a time) ---
-                const BATCH_SIZE = 5;
-                for (let i = 0; i < openPositions.length; i += BATCH_SIZE) {
-                    const batch = openPositions.slice(i, i + BATCH_SIZE);
-                    await Promise.allSettled(batch.map(pos => updatePositionPrice(pos)));
-                }
-
-                if (config.DEBUG_LOGS && posCount > 0) console.log(`[PRICE-UPDATE] ${posCount} positions | ${updated} updated | ${failed} failed | ${skippedNoToken} no-token | ${skippedNoCache} no-cache`);
-
-                // Persist updates to disk
-                if (updated > 0) {
-                    this.ledger.save();
-                }
-
-
-
             } catch (e: any) {
                 console.error('\n[ENGINE] Poll Error:', e);
                 this.flog.error('Poll loop error', { error: e.message, stack: e.stack });
@@ -496,8 +419,88 @@ class TradingEngine {
             if (!this.isPolling) break;
             await new Promise(r => setTimeout(r, config.POLL_INTERVAL_MS));
         }
+
+        // Cleanup background intervals on stop
+        clearInterval(priceUpdateInterval);
+        clearInterval(lifecycleInterval);
+        clearInterval(liquidityInterval);
+
         this.flog.engine('Polling loop exited (while-loop ended)');
         console.log('\n[ENGINE] Polling loop stopped.');
+    }
+
+    // --- PRICE UPDATES (separated from main loop) ---
+    private async updateAllPrices() {
+        const positions = this.ledger.getPositions();
+        const openPositions = Object.values(positions).filter(p => p.state === 'OPEN');
+        if (openPositions.length === 0) return;
+
+        let skippedNoToken = 0;
+        let skippedNoCache = 0;
+        let updated = 0;
+        let failed = 0;
+
+        const updatePositionPrice = async (pos: any) => {
+            try {
+                if (!pos.tokenId) { skippedNoToken++; return; }
+
+                let fetchTokenId = pos.tokenId;
+                let isNOposition = false;
+
+                if (pos.marketType === 'MULTI' && pos.side === 'NO') {
+                    const cache = this.ledger.getMarketCache(pos.marketId);
+                    if (cache?.clobTokenIds && cache.clobTokenIds.length >= 2) {
+                        const yesToken = cache.clobTokenIds.find((t: string) => t !== pos.tokenId);
+                        if (yesToken) { fetchTokenId = yesToken; isNOposition = true; }
+                    } else { skippedNoCache++; return; }
+                }
+
+                const orderBook = await this.api.getOrderBookForToken(fetchTokenId, pos.marketId);
+                let yesMidPrice: number | null = null;
+
+                if (orderBook) {
+                    if (orderBook.bids.length > 0 && orderBook.asks.length > 0) {
+                        yesMidPrice = (orderBook.bids[0].price + orderBook.asks[0].price) / 2;
+                    } else if (orderBook.bids.length > 0) {
+                        yesMidPrice = orderBook.bids[0].price;
+                    } else if (orderBook.asks.length > 0) {
+                        yesMidPrice = orderBook.asks[0].price;
+                    }
+                }
+
+                if (yesMidPrice === null) {
+                    const cache = this.ledger.getMarketCache(pos.marketId);
+                    if (cache?.model?.outcomes) {
+                        const yesOutcome = cache.model.outcomes.find((o: any) => o.label === 'Yes');
+                        if (yesOutcome?.price != null) yesMidPrice = yesOutcome.price;
+                    }
+                }
+
+                if (yesMidPrice === null) { failed++; return; }
+
+                const currentPrice = isNOposition ? (1 - yesMidPrice) : yesMidPrice;
+
+                if (!isNaN(currentPrice) && currentPrice >= 0) {
+                    pos.currentPrice = currentPrice;
+                    pos.currentValue = currentPrice * pos.size;
+                    pos.unrealizedPnL = pos.currentValue - pos.investedUsd;
+                    try { if (pos.currentPrice !== undefined) { pos.currentTick = Math.round(pos.currentPrice * 1000); } } catch (e) { }
+                    updated++;
+                }
+            } catch (err: any) { failed++; }
+        };
+
+        const BATCH_SIZE = 5;
+        for (let i = 0; i < openPositions.length; i += BATCH_SIZE) {
+            const batch = openPositions.slice(i, i + BATCH_SIZE);
+            await Promise.allSettled(batch.map(pos => updatePositionPrice(pos)));
+        }
+
+        if (config.DEBUG_LOGS && openPositions.length > 0) {
+            console.log(`[PRICE-UPDATE] ${openPositions.length} positions | ${updated} updated | ${failed} failed | ${skippedNoToken} no-token | ${skippedNoCache} no-cache`);
+        }
+
+        if (updated > 0) this.ledger.save();
     }
 
     // --- LIFECYCLE MANAGEMENT (NEW) ---
@@ -602,7 +605,8 @@ class TradingEngine {
             }
 
             try {
-                const ob = await this.api.getOrderBook(pos.marketId);
+                // Use cached tokenId to skip metadata re-fetch
+                const ob = await this.api.getOrderBook(pos.marketId, pos.tokenId);
                 // If orderbook is completely empty or bids are missing (cannot sell)
                 if (!ob || ob.bids.length === 0) {
                     const fails = (this.liquidityFailures.get(pos.marketId) || 0) + 1;
@@ -676,8 +680,8 @@ class TradingEngine {
         // Time Filter (Lookback window)
         if (msTimestamp < this.botStartupTime) return;
 
-        // Deduplication Filter
-        if (this.ledger.getTradeEvents().find(e => e.eventId === txHash)) return;
+        // Deduplication Filter (O(1) Set lookup)
+        if (this.processedTxHashes.has(txHash)) return;
 
         const rawSide = (raw.side || '').toUpperCase(); // "BUY" or "SELL"
         const isBuy = rawSide === 'BUY';
@@ -719,17 +723,12 @@ class TradingEngine {
             return;
         }
 
-        // NEW: Detect Market Type immediately
+        // Detect Market Type from already-fetched/cached metadata (no extra API call)
         let marketType: "SINGLE" | "MULTI" = "SINGLE";
         try {
-            // Use fresh meta if available, else derive/default.
-            // We can re-fetch or use what we have.
-            // Since we have 'model', we might have cached it.
-            // But we need the CONTAINER (markets array) which might not be in 'model'.
-            // Let's safe-fetch specific for this logic to be robust.
-            const container = await this.api.getMarketDetails(marketId);
-            if (container) {
-                marketType = MarketLifecycle.getMarketLifecycle(container, marketId).marketType;
+            const cachedContainer = this.ledger.getMarketCache(marketId);
+            if (cachedContainer) {
+                marketType = MarketLifecycle.getMarketLifecycle(cachedContainer, marketId).marketType;
             }
         } catch (e) { }
 
@@ -957,7 +956,7 @@ class TradingEngine {
                 );
 
                 if (result.success && result.data) {
-                    const execTime = Date.now();
+                    this.processedTxHashes.add(txHash); // Track for O(1) dedup
                     console.log(
                         `✅ [BUY] ${myShares.toFixed(1)} ${outcomeLabel} @ $${executionPrice.toFixed(4)} on "${marketName}"`
                     );
@@ -972,6 +971,7 @@ class TradingEngine {
 
             } else {
                 // --- SELL: EXIT ---
+                this.processedTxHashes.add(txHash); // Track for O(1) dedup
                 this.flog.trade('SELL signal from copy target — delegating to close', {
                     market: marketName?.substring(0, 40), side, outcomeLabel,
                     shares: myShares.toFixed(2), price: executionPrice.toFixed(4), txHash

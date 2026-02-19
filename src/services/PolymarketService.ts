@@ -202,17 +202,23 @@ export class PolymarketService {
 
 
 
-  public async getOrderBook(marketId: string): Promise<OrderBook | null> {
+  /**
+   * Gets order book using a provided tokenId (fast path, no metadata fetch).
+   * Falls back to getMarketDetails only if no tokenId is provided.
+   */
+  public async getOrderBook(marketId: string, cachedTokenId?: string): Promise<OrderBook | null> {
     try {
-      // Get market metadata to extract token IDs
+      if (cachedTokenId) {
+        return await this.getOrderBookForToken(cachedTokenId, marketId);
+      }
+
+      // Slow fallback: fetch metadata to get token IDs
       const marketCache = await this.getMarketDetails(marketId);
       if (!marketCache?.clobTokenIds || marketCache.clobTokenIds.length < 2) {
         console.debug(`[ORDERBOOK] No token IDs available for market ${marketId.substring(0, 8)}...`);
         return null;
       }
 
-      // Default to YES token (index 1) for backward compatibility
-      // For multi-outcome, this might need to change to a specific selected outcome
       const yesTokenId = marketCache.clobTokenIds[1];
       if (!yesTokenId) {
         console.debug(`[ORDERBOOK] Missing YES token for ${marketId.substring(0, 8)}...`);
@@ -318,15 +324,13 @@ export class PolymarketService {
     }
   }
 
-  public async getLivePrice(conditionId: string): Promise<MarketPrice | null> {
-    const book = await this.getOrderBook(conditionId);
+  public async getLivePrice(conditionId: string, cachedTokenId?: string): Promise<MarketPrice | null> {
+    const book = await this.getOrderBook(conditionId, cachedTokenId);
     if (!book || book.bids.length === 0 || book.asks.length === 0) return null;
 
     const bestBid = book.bids[0].price;
     const bestAsk = book.asks[0].price;
     const midPrice = (bestBid + bestAsk) / 2;
-
-    // console.log('[CLOB PRICE]', conditionId, { bestBid, bestAsk, midPrice });
 
     return { bestBid, bestAsk, midPrice };
   }
