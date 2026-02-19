@@ -25,7 +25,7 @@ type LogCategory =
   | 'BOOT' | 'SHUTDOWN' | 'CRASH'
   | 'TRADE' | 'CLOSE' | 'LIFECYCLE'
   | 'WATCHDOG' | 'API' | 'ENGINE'
-  | 'LEDGER' | 'ERROR' | 'SYSTEM';
+  | 'LEDGER' | 'ERROR' | 'SYSTEM' | 'MEMORY';
 
 class FileLogger {
   private static instance: FileLogger;
@@ -33,6 +33,8 @@ class FileLogger {
   private currentDate: string = '';
   private stream: fs.WriteStream | null = null;
   private sessionId: string;
+  private memoryInterval: ReturnType<typeof setInterval> | null = null;
+  private peakHeapMB: number = 0;
 
   private constructor() {
     this.logDir = path.join(process.cwd(), 'logs');
@@ -42,6 +44,7 @@ class FileLogger {
     // Unique session ID to correlate logs across restarts
     this.sessionId = Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
     this.rotateIfNeeded();
+    this.startMemoryMonitor();
   }
 
   public static getInstance(): FileLogger {
@@ -97,6 +100,53 @@ class FileLogger {
     }
   }
 
+  // ===== Memory Monitoring =====
+
+  /**
+   * Returns current memory stats in MB.
+   */
+  public getMemoryStats(): { heapUsedMB: number; heapTotalMB: number; rssMB: number; externalMB: number; peakHeapMB: number } {
+    const mem = process.memoryUsage();
+    const heapUsedMB = Math.round(mem.heapUsed / 1024 / 1024 * 100) / 100;
+    const heapTotalMB = Math.round(mem.heapTotal / 1024 / 1024 * 100) / 100;
+    const rssMB = Math.round(mem.rss / 1024 / 1024 * 100) / 100;
+    const externalMB = Math.round(mem.external / 1024 / 1024 * 100) / 100;
+    if (heapUsedMB > this.peakHeapMB) this.peakHeapMB = heapUsedMB;
+    return { heapUsedMB, heapTotalMB, rssMB, externalMB, peakHeapMB: this.peakHeapMB };
+  }
+
+  /**
+   * Log current memory usage with a label.
+   */
+  public memory(label: string): void {
+    const stats = this.getMemoryStats();
+    this.log('MEMORY', label, stats);
+  }
+
+  /**
+   * Starts a periodic memory sampler (every 60s).
+   * Logs a warning if heap exceeds 80% of heapTotal or RSS > 512MB.
+   */
+  private startMemoryMonitor(): void {
+    this.memoryInterval = setInterval(() => {
+      const stats = this.getMemoryStats();
+      const heapPct = Math.round(stats.heapUsedMB / stats.heapTotalMB * 100);
+      let label = `Periodic sample | heap ${heapPct}%`;
+      if (stats.rssMB > 512) {
+        label = `HIGH RSS WARNING (${stats.rssMB}MB) | heap ${heapPct}%`;
+      }
+      if (heapPct > 85) {
+        label = `HIGH HEAP WARNING (${heapPct}%) | RSS ${stats.rssMB}MB`;
+      }
+      this.log('MEMORY', label, stats);
+    }, 60_000);
+
+    // Don't prevent process exit
+    if (this.memoryInterval.unref) {
+      this.memoryInterval.unref();
+    }
+  }
+
   // ===== Convenience methods =====
 
   public boot(message: string, data?: Record<string, any>): void {
@@ -147,6 +197,10 @@ class FileLogger {
    * Flush and close the stream. Call before process.exit().
    */
   public flush(): void {
+    if (this.memoryInterval) {
+      clearInterval(this.memoryInterval);
+      this.memoryInterval = null;
+    }
     if (this.stream) {
       this.stream.end();
       this.stream = null;
