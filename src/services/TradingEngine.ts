@@ -10,6 +10,7 @@ import PositionFilter from './PositionFilter.js';
 import { PositionState, CloseTrigger, CloseCause, TradeAmountMode, TradeAmountSettings, NormalizedMarket, NormalizedOutcome } from '../types.js';
 import FeatureSwitches from '../config/switches.js';
 import { toTick, fromTick, clampTick, TICK_SCALE, MAX_TICK } from '../utils/ticks.js';
+import FileLogger from './FileLogger.js';
 
 class TradingEngine {
     private static instance: TradingEngine;
@@ -27,6 +28,7 @@ class TradingEngine {
 
     private tradeSettings: TradeAmountSettings;
     private settingsPath: string;
+    private flog: FileLogger;
 
     private constructor() {
         this.ledger = LedgerService.getInstance();
@@ -35,6 +37,7 @@ class TradingEngine {
         // this.marketResolver = new MarketResolver(); // DEPRECATED
         this.retryHelper = new RetryHelper({ maxAttempts: 3, baseDelayMs: 300 });
         this.positionFilter = new PositionFilter();
+        this.flog = FileLogger.getInstance();
 
         // Initialize Default Settings
         this.tradeSettings = {
@@ -59,6 +62,7 @@ class TradingEngine {
         if (this.isPolling) {
             this.isPolling = false;
             console.log('[ENGINE] Stopping polling loop...');
+            this.flog.engine('Polling loop STOPPED');
         }
     }
 
@@ -67,9 +71,11 @@ class TradingEngine {
     }
 
     public setTradeSettings(settings: Partial<TradeAmountSettings>) {
+        const oldSettings = { ...this.tradeSettings };
         this.tradeSettings = { ...this.tradeSettings, ...settings };
         this.saveSettings();
         console.log(`[ENGINE] Updated Trade Settings: Mode=${this.tradeSettings.mode}, Pct=${this.tradeSettings.percentage}, Fixed=$${this.tradeSettings.fixedAmountUsd}`);
+        this.flog.engine('Trade settings changed', { old: oldSettings, new: this.tradeSettings });
     }
 
     private loadSettings() {
@@ -109,6 +115,10 @@ class TradingEngine {
     public async closeAllPositions(): Promise<void> {
         console.log('[ENGINE] 🚨 CLOSING ALL POSITIONS...');
         const positions = Object.values(this.ledger.getPositions());
+        this.flog.close('CLOSE-ALL triggered', {
+            positionCount: positions.length,
+            positions: positions.map(p => ({ market: p.marketName?.substring(0, 40), side: p.side, state: p.state, size: p.size }))
+        });
         if (positions.length === 0) {
             console.log('[ENGINE] No positions to close.');
             return;
@@ -116,6 +126,7 @@ class TradingEngine {
         for (const pos of positions) {
             try {
                 console.log(`[ENGINE] Closing ${pos.marketName}...`);
+                this.flog.close(`CLOSE-ALL: closing position`, { market: pos.marketName?.substring(0, 40), side: pos.side, tokenId: pos.tokenId?.substring(0, 12) });
                 await this.tryClosePosition(
                     pos.marketId,
                     pos.side,
@@ -126,10 +137,12 @@ class TradingEngine {
                     pos.outcomeLabel
                 );
                 await new Promise(r => setTimeout(r, 200));
-            } catch (e) {
+            } catch (e: any) {
                 console.error(`[ENGINE] Failed to close ${pos.marketName}`, e);
+                this.flog.error(`CLOSE-ALL: failed to close position`, { market: pos.marketName, error: e.message });
             }
         }
+        this.flog.close('CLOSE-ALL completed');
         console.log('[ENGINE] ✅ All positions closed.');
     }
 
@@ -175,6 +188,7 @@ class TradingEngine {
         // 1. EXISTENCE CHECK
         if (!pos) {
             console.warn(`[CLOSE-FAIL] Position not found: ${posKey}`);
+            this.flog.close('CLOSE-FAIL: position not found', { posKey, trigger, cause });
             return;
         }
 
@@ -239,6 +253,15 @@ class TradingEngine {
         pos.closeCause = cause;
 
         if (config.DEBUG_LOGS) console.log(`[CLOSE-EXEC] ${trigger} | ${cause} | ${posKey} @ $${exitPrice.toFixed(2)}`);
+        this.flog.close('CLOSE-EXEC: executing close', {
+            trigger, cause, posKey,
+            market: pos.marketName?.substring(0, 40),
+            side: pos.side,
+            size: pos.size,
+            entryPrice: pos.entryPrice,
+            exitPrice: exitPrice.toFixed(4),
+            state: pos.state
+        });
 
         // 6. EXECUTE LEDGER UPDATE
         // We pass the "Reason" string in the format "TRIGGER|CAUSE" to match LedgerService parsing logic
@@ -263,6 +286,7 @@ class TradingEngine {
             }
         } catch (err: any) {
             console.error(`[CLOSE-ERROR] Failed to execute close for ${posKey}:`, err);
+            this.flog.error('CLOSE-ERROR: ledger update failed', { posKey, trigger, cause, error: err.message, stack: err.stack });
 
             // LOG: Resolution Path Diagnostics
             if (trigger === CloseTrigger.MARKET_RESOLUTION) {
@@ -286,6 +310,7 @@ class TradingEngine {
         }
 
         this.isPolling = true;
+        this.flog.engine('Polling loop STARTED', { profile: config.PROFILE_ADDRESS, startupTime: new Date(this.botStartupTime).toISOString() });
         if (config.DEBUG_LOGS) {
             console.log(`[ENGINE] Started polling ${config.PROFILE_ADDRESS}`);
             console.log(`[ENGINE] Processing trades from: ${new Date(this.botStartupTime).toLocaleTimeString()} onwards`);
@@ -463,13 +488,15 @@ class TradingEngine {
 
 
 
-            } catch (e) {
+            } catch (e: any) {
                 console.error('\n[ENGINE] Poll Error:', e);
+                this.flog.error('Poll loop error', { error: e.message, stack: e.stack });
             }
 
             if (!this.isPolling) break;
             await new Promise(r => setTimeout(r, config.POLL_INTERVAL_MS));
         }
+        this.flog.engine('Polling loop exited (while-loop ended)');
         console.log('\n[ENGINE] Polling loop stopped.');
     }
 
@@ -491,6 +518,7 @@ class TradingEngine {
                 if (lifecycle.state === "PENDING_RESOLUTION") {
                     if (pos.state !== PositionState.PENDING_RESOLUTION && pos.state !== PositionState.CLOSED) {
                         if (config.DEBUG_LOGS) console.log(`[LIFECYCLE] Moving ${pos.marketName} to PENDING_RESOLUTION`);
+                        this.flog.lifecycle('State -> PENDING_RESOLUTION', { market: pos.marketName?.substring(0, 40), side: pos.side, prevState: pos.state });
                         this.ledger.updatePositionState(pos.positionId || pos.marketId, PositionState.PENDING_RESOLUTION);
                     }
                 }
@@ -522,6 +550,12 @@ class TradingEngine {
                                 ? `WinningSide: ${lifecycle.winningSide}, MySide: ${pos.side}`
                                 : `WinnerLabel: ${winningLabel}, MyLabel: ${pos.outcomeLabel}`;
                             if (config.DEBUG_LOGS) console.log(`[LIFECYCLE] Resolving ${pos.marketName} [${lifecycle.marketType}]. ${logExtra}. Result: ${isWinner ? 'WIN' : 'LOSS'}`);
+                            this.flog.lifecycle('MARKET RESOLVED — settling position', {
+                                market: pos.marketName?.substring(0, 40), marketType: lifecycle.marketType,
+                                side: pos.side, outcomeLabel: pos.outcomeLabel,
+                                winningSide: lifecycle.winningSide, winningLabel, isWinner,
+                                size: pos.size, entryPrice: pos.entryPrice
+                            });
                             await this.settlePosition(
                                 pos.marketId,
                                 pos.side,
@@ -542,8 +576,9 @@ class TradingEngine {
                     }
                 }
 
-            } catch (e) {
+            } catch (e: any) {
                 console.error(`[LIFECYCLE] Error managing ${pos.marketName}:`, e);
+                this.flog.error('Lifecycle error', { market: pos.marketName?.substring(0, 40), error: e.message });
             }
         }
     }
@@ -575,10 +610,12 @@ class TradingEngine {
 
                     if (fails < 3) {
                         if (config.DEBUG_LOGS) console.warn(`[LIQUIDITY-WARN] Empty book for ${pos.marketName} (${fails}/3). Waiting...`);
+                        this.flog.watchdog('Empty orderbook', { market: pos.marketName?.substring(0, 40), fails, maxFails: 3 });
                         continue; // Don't close yet
                     }
 
                     if (config.DEBUG_LOGS) console.warn(`[LIQUIDITY-GUARD] No liquidity for ${pos.marketName} after 3 checks. Holding for resolution.`);
+                    this.flog.watchdog('No liquidity after 3 checks — holding for resolution', { market: pos.marketName?.substring(0, 40) });
                     // await this.tryClosePosition(
                     //     pos.marketId,
                     //     pos.side,
@@ -883,6 +920,7 @@ class TradingEngine {
 
             if (!slippageEstimate.shouldExecute) {
                 console.log(`❌ [SKIP] Slippage ${(slippageEstimate.totalSlippage * 100).toFixed(2)}% > Threshold (Market too thin)`);
+                this.flog.trade('SKIP: slippage too high', { market: marketName?.substring(0, 40), side, slippage: (slippageEstimate.totalSlippage * 100).toFixed(2) + '%' });
                 if (config.DEBUG_LOGS) console.log(this.slippageCalculator.getDetailedLog(
                     slippageEstimate,
                     marketId,
@@ -923,11 +961,21 @@ class TradingEngine {
                     console.log(
                         `✅ [BUY] ${myShares.toFixed(1)} ${outcomeLabel} @ $${executionPrice.toFixed(4)} on "${marketName}"`
                     );
+                    this.flog.trade('BUY executed', {
+                        market: marketName?.substring(0, 40), side, outcomeLabel, tokenId: tokenId?.substring(0, 12),
+                        shares: myShares.toFixed(2), price: executionPrice.toFixed(4),
+                        costUsd: (myShares * executionPrice).toFixed(2), marketType,
+                        sourcePrice, txHash
+                    });
                     this.updateWebsocketSubscription();
                 }
 
             } else {
                 // --- SELL: EXIT ---
+                this.flog.trade('SELL signal from copy target — delegating to close', {
+                    market: marketName?.substring(0, 40), side, outcomeLabel,
+                    shares: myShares.toFixed(2), price: executionPrice.toFixed(4), txHash
+                });
                 // Delegate to Centralized Close Logic
                 await this.tryClosePosition(
                     marketId,
@@ -942,10 +990,12 @@ class TradingEngine {
 
         } catch (e: any) {
             console.error(`❌ [CRITICAL] Trade execution failed: ${e.message}`);
+            this.flog.error('CRITICAL trade execution failed', { market: marketName?.substring(0, 40), side, error: e.message, stack: e.stack });
         }
     }
 
     public async manualClosePosition(marketId: string, side: 'YES' | 'NO', tokenId?: string, outcomeLabel?: string) {
+        this.flog.close('manualClosePosition called', { marketId: marketId?.substring(0, 16), side, tokenId: tokenId?.substring(0, 12), outcomeLabel });
         // NEW ROBUST POSITION KEY
         let posKey = tokenId ? `${marketId}-${tokenId}` : `${marketId}-${side}-${outcomeLabel}`;
         let pos = this.ledger.getPositions()[posKey];

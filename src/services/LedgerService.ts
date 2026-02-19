@@ -2,17 +2,20 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { LedgerSchema, Position, ClosedPosition, TradeEvent, PositionState, CloseTrigger, CloseCause, NormalizedMarket } from '../types.js';
 import { toTick, TICK_SCALE } from '../utils/ticks.js';
+import FileLogger from './FileLogger.js';
 
 class LedgerService {
   private static instance: LedgerService;
   private ledgerPath: string;
   private state: LedgerSchema;
   public priceCache: Record<string, { price: number; timestamp: number }> = {};
+  private flog: FileLogger;
 
   private constructor() {
     this.ledgerPath = path.join(process.cwd(), 'data', 'ledger.json');
     this.ensureDirectory();
     this.state = this.loadLedger();
+    this.flog = FileLogger.getInstance();
   }
 
   public static getInstance(): LedgerService {
@@ -219,13 +222,13 @@ class LedgerService {
     };
 
     if (!isBuy && !existing && actionReason !== 'RESOLUTION') {
-      // console.log(`[LEDGER] Skipping Orphan Sell: ${finalName}`);
+      this.flog.ledger('Skipping orphan sell — no position exists', { market: finalName?.substring(0, 40), posKey });
       markAsProcessed();
       return false;
     }
 
     if (isBuy && this.state.balance < costUsd) {
-      // console.log(`[LEDGER] Insufficient Funds for ${finalName}`);
+      this.flog.ledger('Insufficient funds — trade rejected', { market: finalName?.substring(0, 40), costUsd: costUsd.toFixed(2), balance: this.state.balance.toFixed(2) });
       markAsProcessed();
       return false;
     }
@@ -328,6 +331,7 @@ class LedgerService {
           // We will enforce the new format in TradingEngine calls.
         }
 
+        const closeTs = Date.now();
         this.state.closedPositions.unshift({
           marketId, marketName: finalName, marketSlug, side,
           outcomeLabel: existing.outcomeLabel || outcomeLabel,
@@ -340,10 +344,22 @@ class LedgerService {
           investedUsd: costBasisOfSold,
           returnUsd: proceeds,
           realizedPnL: existing.realizedPnL,
-          closeTimestamp: Date.now(),
+          closeTimestamp: closeTs,
           state: PositionState.CLOSED,
           closeTrigger: trigger,
           closeCause: cause
+        });
+        this.flog.ledger('POSITION CLOSED', {
+          market: finalName?.substring(0, 40), side,
+          outcomeLabel: existing.outcomeLabel || outcomeLabel,
+          trigger, cause,
+          entryPrice: existing.entryPrice?.toFixed(4),
+          exitPrice: price?.toFixed(4),
+          size: sellShares?.toFixed(2),
+          invested: costBasisOfSold?.toFixed(2),
+          returned: proceeds?.toFixed(2),
+          realizedPnL: existing.realizedPnL?.toFixed(2),
+          balance: this.state.balance?.toFixed(2)
         });
         delete this.state.positions[posKey];
       }
