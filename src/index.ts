@@ -116,9 +116,16 @@ async function main() {
         flog.boot('LedgerService initialized', { balance: currentBalance.toFixed(2), openPositions: openCount });
 
         // 3. Initialize API Connection
-        PolymarketService.getInstance();
+        const polyService = PolymarketService.getInstance();
         if (config.DEBUG_LOGS) logService.logSystem('API', 'Polymarket Service ready');
         flog.boot('PolymarketService initialized');
+
+        // 3.5 Pre-warm market metadata cache for open positions
+        const openMarketIds = Object.values(ledgerService.getPositions()).map(p => p.marketId);
+        if (openMarketIds.length > 0) {
+            flog.boot(`Pre-warming cache for ${openMarketIds.length} open positions`);
+            await polyService.preWarmCache(openMarketIds);
+        }
 
         // 4. Initialize Trading Engine
         const tradingEngine = TradingEngine.getInstance();

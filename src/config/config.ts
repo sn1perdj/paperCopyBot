@@ -31,7 +31,7 @@ const parseFloatEnv = (key: string, defaultVal: number): number => {
 
 export const config: Config = {
   PROFILE_ADDRESS: process.env.PROFILE_ADDRESS ?? '',
-  POLL_INTERVAL_MS: parseIntEnv('POLL_INTERVAL_MS', 1000),
+  POLL_INTERVAL_MS: parseIntEnv('POLL_INTERVAL_MS', 500),
   MAX_TRADE_SIZE_USD: parseFloatEnv('MAX_TRADE_SIZE_USD', 10),
   MAX_EXPOSURE_PCT: parseFloatEnv('MAX_EXPOSURE_PCT', 0.2),
   PORT: parseIntEnv('PORT', 3000),

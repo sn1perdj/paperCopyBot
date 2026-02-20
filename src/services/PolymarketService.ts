@@ -19,6 +19,11 @@ export class PolymarketService {
   private ws: WebSocket | null = null;
   private keepAliveInterval: NodeJS.Timeout | null = null;
 
+  // In-memory cache for getMarketDetails() — avoids redundant HTTP calls
+  // Key: marketId, Value: { data, timestamp }
+  private marketDetailsCache = new Map<string, { data: any; ts: number }>();
+  private static CACHE_TTL_MS = 60_000; // 60s TTL — market metadata rarely changes
+
   private constructor() {
     this.dataApiClient = axios.create({ baseURL: 'https://data-api.polymarket.com', timeout: 5000 });
     this.gammaApiClient = axios.create({ baseURL: 'https://gamma-api.polymarket.com', timeout: 5000 });
@@ -56,6 +61,12 @@ export class PolymarketService {
   }
 
   public async getMarketDetails(marketId: string) {
+    // Check in-memory cache first
+    const cached = this.marketDetailsCache.get(marketId);
+    if (cached && (Date.now() - cached.ts) < PolymarketService.CACHE_TTL_MS) {
+      return cached.data;
+    }
+
     try {
       let data = null;
       try {
@@ -174,7 +185,7 @@ export class PolymarketService {
 
       // === NORMALIZATION END ===
 
-      return {
+      const result = {
         id: marketId,
         question: data.question,
         eventSlug,
@@ -197,6 +208,10 @@ export class PolymarketService {
         // NEW: Normalized Model
         model: marketModel
       };
+
+      // Store in cache before returning
+      this.marketDetailsCache.set(marketId, { data: result, ts: Date.now() });
+      return result;
     } catch (e) { return null; }
   }
 
@@ -243,6 +258,9 @@ export class PolymarketService {
         });
 
         if (!res.ok) {
+          // CRITICAL: Must consume response body to release the TCP connection back to the pool.
+          // Without this, connections leak and eventually all fetch() calls hang forever.
+          try { await res.text(); } catch (_) {}
           if (config.DEBUG_LOGS) console.debug(`[ORDERBOOK] HTTP ${res.status} for ${contextId}... (attempt ${attempt})`);
           if (attempt < MAX_ATTEMPTS) { await new Promise(r => setTimeout(r, 300)); continue; }
           return null;
@@ -391,6 +409,21 @@ export class PolymarketService {
     if (this.keepAliveInterval) {
       clearInterval(this.keepAliveInterval);
     }
+  }
+
+  /**
+   * Pre-warm the in-memory cache for a list of market IDs.
+   * Called at startup to avoid cold-cache penalties on the first poll cycle.
+   */
+  public async preWarmCache(marketIds: string[]): Promise<void> {
+    const unique = [...new Set(marketIds)];
+    if (unique.length === 0) return;
+    console.log(`[CACHE] Pre-warming ${unique.length} markets...`);
+    const results = await Promise.allSettled(
+      unique.map(id => this.getMarketDetails(id))
+    );
+    const ok = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
+    console.log(`[CACHE] Pre-warmed ${ok}/${unique.length} markets`);
   }
 
   /**

@@ -400,9 +400,28 @@ class TradingEngine {
         });
 
         // --- FAST TRADE DETECTION LOOP (only polls for new trades) ---
+        let lastPollSuccess = Date.now();
+        let pollCount = 0;
+
+        // --- Freeze detection watchdog (every 60s) ---
+        const freezeWatchdog = setInterval(() => {
+            const staleMs = Date.now() - lastPollSuccess;
+            if (staleMs > 120_000) { // 2 minutes without a successful poll = frozen
+                this.flog.error('FREEZE DETECTED — poll loop stalled', {
+                    staleSec: Math.round(staleMs / 1000),
+                    lastPollSuccess: new Date(lastPollSuccess).toISOString(),
+                    pollCount
+                });
+                console.error(`[FREEZE-WATCHDOG] Poll loop stalled for ${Math.round(staleMs / 1000)}s! Possible connection pool exhaustion.`);
+            }
+        }, 60_000);
+        if (freezeWatchdog.unref) freezeWatchdog.unref();
+
         while (this.isPolling) {
             try {
                 const activities = await this.api.getUserActivity(config.PROFILE_ADDRESS);
+                lastPollSuccess = Date.now();
+                pollCount++;
                 const fetchTime = Date.now();
                 const sortedActivities = activities.reverse();
 
@@ -410,6 +429,11 @@ class TradingEngine {
                     if (act.type === 'TRADE') {
                         await this.processAutoTrade(act, fetchTime);
                     }
+                }
+
+                // Heartbeat log every 500 polls (~8 min at 1s interval)
+                if (pollCount % 500 === 0) {
+                    this.flog.engine('Poll heartbeat', { pollCount, openPositions: Object.keys(this.ledger.getPositions()).length });
                 }
             } catch (e: any) {
                 console.error('\n[ENGINE] Poll Error:', e);
@@ -419,6 +443,8 @@ class TradingEngine {
             if (!this.isPolling) break;
             await new Promise(r => setTimeout(r, config.POLL_INTERVAL_MS));
         }
+
+        clearInterval(freezeWatchdog);
 
         // Cleanup background intervals on stop
         clearInterval(priceUpdateInterval);
@@ -947,7 +973,7 @@ class TradingEngine {
                             txHash,
                             'COPY_TRADE', // Entry Reason
                             sourcePrice,
-                            Math.max(0, Date.now() - fetchTime),
+                            Math.max(0, Date.now() - msTimestamp), // Total latency: source trade timestamp → our execution
                             tokenId, // NEW
                             marketType // Pass Detected Type
                         );
